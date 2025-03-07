@@ -528,7 +528,11 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
                 # with open(local_file_path, "wb") as f:
                 #     f.write(base64.b64decode(res.png))
                 png_bytes = base64.b64decode(res.png)
-                s3_url = upload_to_s3_direct(png_bytes, step_index, idx, S3_BUCKET_NAME)
+                if not isinstance(png_bytes, (bytes, bytearray)):
+                    raise TypeError(f"Decoded content is not bytes. Got: {type(png_bytes)}")
+
+                file_name = f"step{step_index+1}_{timestamp}.png"
+                s3_url = upload_to_s3_direct(png_bytes, file_name, S3_BUCKET_NAME)
                 if s3_url:
                     stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
             else:
