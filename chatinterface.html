@@ -48,7 +48,7 @@
     };
 
     function initializeWebSocket() {
-        ws = new WebSocket("ws://localhost:5006/ws");
+        ws = new WebSocket("wss://custom-code-interpreter.onrender.com/ws");
 
         ws.onopen = () => {
             console.log("✅ Connected to WebSocket");
