@@ -511,8 +511,8 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
         #print(user_csv_path," user_csv_path")
 
         # ✅ Step 2: Download files
-        local_directory = "/Users/atharvwani/dloads"  # Change this to your preferred path
-        os.makedirs(local_directory, exist_ok=True)  # Ensure directory exists
+        # local_directory = "/Users/atharvwani/dloads"  # Change this to your preferred path
+        # os.makedirs(local_directory, exist_ok=True)  # Ensure directory exists
 
         downloaded_files = []
 
@@ -520,19 +520,17 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
         #print(len(result.results)," size")
         for idx, res in enumerate(result.results):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            local_file_path = os.path.join(local_directory, f"step{step_index+1}_{timestamp}.png")  # Set filename per result
+            # local_file_path = os.path.join(local_directory, f"step{step_index+1}_{timestamp}.png")  # Set filename per result
             #print(local_file_path)
             #print(res)
             if hasattr(res, "png") and res.png:
                 # print("Inside hasattr", res, " ", res.png)
-                with open(local_file_path, "wb") as f:
-                    f.write(base64.b64decode(res.png))
-                print(f'✅ Chart saved as {local_file_path}')
-                stream_to_frontend("bot_message", f'\n✅ Chart saved as {local_file_path}')
-                s3_url = upload_to_s3(local_file_path, S3_BUCKET_NAME)
+                # with open(local_file_path, "wb") as f:
+                #     f.write(base64.b64decode(res.png))
+                png_bytes = base64.b64decode(res.png)
+                s3_url = upload_to_s3_direct(png_bytes, step_index, idx, S3_BUCKET_NAME)
                 if s3_url:
-                    # uploaded_files.append(s3_url)
-                    stream_to_frontend("bot_message", f'\n✅ Uploaded to S3: {s3_url}')
+                    stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
             else:
                 #print("else hasattr", res, " ", res.png)
                 print(f'⚠️ No PNG found in result {idx+1}, skipping.')
