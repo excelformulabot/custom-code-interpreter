@@ -1,0 +1,141 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <title>CSV Analysis Chat (WebSockets + Fetch)</title>
+    <style>
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        body { font-family: Arial, sans-serif; background-color: #f4f4f9; height: 100vh; margin: 0; display: flex; justify-content: center; align-items: center; }
+        .chat-container { width: 100%; max-width: 1200px; height: 100%; background: white; border-radius: 10px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2); display: flex; flex-direction: column; }
+        .chat-header { background-color: #007bff; color: white; padding: 15px; text-align: center; font-weight: bold; }
+        .chat-messages { flex: 1; padding: 15px; overflow-y: auto; background-color: #f9f9f9; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; }
+        .message { margin: 8px 0; padding: 10px; border-radius: 8px; max-width: 75%; word-break: break-word; }
+        .user-message { background-color: #007bff; color: white; align-self: flex-end; margin-left: auto; }
+        .bot-message { background-color: #e5e5ea; color: black; align-self: flex-start; margin-right: auto; }
+        .chat-input { display: flex; flex-direction: column; padding: 15px; border-top: 1px solid #ddd; background: white; gap: 8px; }
+        .chat-input input, .chat-input textarea { padding: 12px; border: 1px solid #ccc; border-radius: 8px; }
+        .chat-input input[type="text"] { flex: 1; }
+        .chat-input textarea { height: 80px; resize: none; }
+        .chat-input button { background-color: #007bff; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; }
+        .chat-input button:hover { background-color: #0056b3; }
+    </style>
+</head>
+<body>
+
+<div class="chat-container">
+    <div class="chat-header">📊 CSV Analysis Chat</div>
+    <div class="chat-messages" id="chat-messages"></div>
+    <div class="chat-input">
+        <input type="text" id="user-query" placeholder="Enter analysis query...">
+        <textarea id="csv-urls" placeholder="Enter CSV URLs (one per line)"></textarea>
+        <button onclick="sendMessage()">Send</button>
+    </div>
+</div>
+
+<script>
+    let userID = null;  // Global variable to store userID
+    let ws = null;      // WebSocket will be created after user enters ID
+    let currentBotMessage = "";
+
+    // Prompt for User ID when page loads
+    window.onload = function () {
+        userID = prompt("Please enter your User ID:");
+        if (!userID) {
+            alert("User ID is required to access this page.");
+            window.location.href = "about:blank";  // Block access if no ID
+            return;
+        }
+        initializeWebSocket();  // ✅ Only create WebSocket after user enters ID
+    };
+
+    function initializeWebSocket() {
+        ws = new WebSocket("ws://localhost:5006/ws");
+
+        ws.onopen = () => {
+            console.log("✅ Connected to WebSocket");
+
+            // Send userID immediately after connecting
+            ws.send(JSON.stringify({
+                event: "register_user",
+                user_id: userID
+            }));
+            console.log(`🔗 Sent userID: ${userID}`);
+        };
+
+        ws.onmessage = (event) => {
+            const data = JSON.parse(event.data);
+            if (data.event === "bot_message") {
+                currentBotMessage += data.message;
+                updateStreamingMessage(currentBotMessage);
+            } else if (data.event === "bot_message_done") {
+                currentBotMessage = "";
+            } else {
+                console.log("Received:", data);
+            }
+        };
+
+        ws.onclose = () => console.log("❌ WebSocket closed");
+    }
+
+    function appendMessage(sender, text) {
+        const chatMessages = document.getElementById("chat-messages");
+        const messageDiv = document.createElement("div");
+        messageDiv.classList.add("message", sender === "user" ? "user-message" : "bot-message");
+        messageDiv.innerText = text;
+        chatMessages.appendChild(messageDiv);
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    function updateStreamingMessage(text) {
+        const chatMessages = document.getElementById("chat-messages");
+        let lastMessage = chatMessages.querySelector(".bot-message:last-child");
+
+        if (!lastMessage || lastMessage.getAttribute("data-streaming") !== "true") {
+            lastMessage = document.createElement("div");
+            lastMessage.classList.add("message", "bot-message");
+            lastMessage.setAttribute("data-streaming", "true");
+            chatMessages.appendChild(lastMessage);
+        }
+
+        lastMessage.innerText = text;
+        chatMessages.scrollTop = chatMessages.scrollHeight;
+    }
+
+    async function sendMessage() {
+        const userQuery = document.getElementById("user-query").value;
+        const csvUrls = document.getElementById("csv-urls").value.trim().split("\n").map(url => url.trim()).filter(url => url);
+
+        if (!userQuery || csvUrls.length === 0) {
+            alert("Please enter a query and at least one CSV URL.");
+            return;
+        }
+
+        appendMessage("user", userQuery);
+
+        const requestData = {
+            user_query: userQuery,
+            csv_file_paths: csvUrls
+        };
+
+        try {
+            const response = await fetch("http://localhost:5006/run", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify(requestData)
+            });
+
+            const data = await response.json();
+            console.log("Run response:", data);
+
+            if (data.error) {
+                appendMessage("bot", `Error: ${data.error}`);
+            }
+        } catch (error) {
+            console.error("Failed to send data:", error);
+            appendMessage("bot", "Failed to start analysis.");
+        }
+    }
+</script>
+
+
+</body>
+</html>
