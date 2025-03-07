@@ -20,6 +20,7 @@ import polars as pl
 from flask_socketio import SocketIO, emit
 import datetime
 from flask_sock import Sock  # ✅ Use Flask-Sock instead of Flask-SocketIO
+from flask import Flask, send_file, request, jsonify
 
 S3_BUCKET_NAME = "code-interpreter-s3"
 
@@ -28,6 +29,9 @@ CORS(appone, resources={r"/*": {"origins": "*"}})
 
 sock = Sock(appone)
 
+@appone.route('/')
+def serve_html():
+    return send_file('chatinterface.html')  # Serve directly from root folder
 
 # Example function to send messages to connected WebSocket clients
 def stream_to_frontend(event, message):
