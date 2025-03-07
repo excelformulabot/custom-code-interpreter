@@ -18,3 +18,4 @@ polars==1.24.0
 Requests==2.32.3
 gunicorn==19.7.1
 pyarrow==14.0.2
+numpy==1.26.4
