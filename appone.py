@@ -2,7 +2,7 @@ import os
 import shutil
 from e2b_code_interpreter import Sandbox
 import io
-from flask import Flask, session
+from flask import Flask
 from flask import Flask, request, jsonify
 import openai
 import time
@@ -78,7 +78,6 @@ def websocket(ws):
             data = json.loads(message)
             if data.get("event") == "register_user":
                 user_id = data.get("user_id")
-                session["user_id"] = user_id
                 print(f"✅ User registered with ID: {user_id}")
             print(f"Received message: {message}")
             ws.send(json.dumps({"event": "server_response", "message": f"Echo: {message}"}))
