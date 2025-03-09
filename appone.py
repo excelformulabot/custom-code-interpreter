@@ -39,9 +39,13 @@ def stream_to_frontend(event, message):
     if connected_ws:
         try:
             connected_ws.send(json.dumps({"event": event, "message": message}))
+            print(f"✅ Sent message to WebSocket: {event} → {message}")
         except Exception as e:
-            print(f"Failed to send message to client: {e}")
-    # print(f"[{event}] {message}", flush=True)
+            print(f"❌ Failed to send message to WebSocket: {e}")
+            connected_ws = None  # Reset connection if failed
+    else:
+        print(f"⚠️ No active WebSocket connection. Unable to send: {event} → {message}")
+
 
 # ✅ Define Global for WebSocket Connection (single connection handling)
 connected_ws = None
@@ -70,22 +74,35 @@ def websocket(ws):
     global connected_ws
     connected_ws = ws
     print("✅ WebSocket client connected")
+
     try:
         while True:
             message = ws.receive()
             if message is None:
                 break
-            data = json.loads(message)
+
+            try:
+                data = json.loads(message)
+            except json.JSONDecodeError:
+                continue  # Ignore invalid JSON
+
+            if data.get("event") == "ping":
+                ws.send(json.dumps({"event": "pong"}))  # Keep connection alive
+                continue
+
             if data.get("event") == "register_user":
                 user_id = data.get("user_id")
                 print(f"✅ User registered with ID: {user_id}")
+
             print(f"Received message: {message}")
             ws.send(json.dumps({"event": "server_response", "message": f"Echo: {message}"}))
+
     except Exception as e:
-        print(f"WebSocket error: {e}")
+        print(f"❌ WebSocket error: {e}")
     finally:
         connected_ws = None
         print("❌ WebSocket client disconnected")
+
 
 
 # 🟢 Step 3: Extract CSV Info and Upload to E2B
