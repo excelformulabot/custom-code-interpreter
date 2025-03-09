@@ -1,7 +1,8 @@
 <!DOCTYPE html>
 <html lang="en">
 <head>
-    <title>CSV Analysis Chat (WebSockets + Fetch)</title>
+    <title>CSV Analysis Chat (Socket.IO + Fetch)</title>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script> <!-- ✅ Include Socket.IO -->
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
         body { font-family: Arial, sans-serif; background-color: #f4f4f9; height: 100vh; margin: 0; display: flex; justify-content: center; align-items: center; }
@@ -33,8 +34,9 @@
 
 <script>
     let userID = null;  // Global variable to store userID
-    let ws = null;      // WebSocket will be created after user enters ID
+    let socket = null;  // ✅ Using Socket.IO
     let currentBotMessage = "";
+    let reconnectTimeout;
 
     // Prompt for User ID when page loads
     window.onload = function () {
@@ -44,36 +46,53 @@
             window.location.href = "about:blank";  // Block access if no ID
             return;
         }
-        initializeWebSocket();  // ✅ Only create WebSocket after user enters ID
+        initializeSocketIO();  // ✅ Initialize Socket.IO
     };
 
-    function initializeWebSocket() {
-        ws = new WebSocket("wss://custom-code-interpreter.onrender.com/ws");
+    function initializeSocketIO() {
+        console.log("🔄 Connecting to Socket.IO...");
+        socket = io("https://custom-code-interpreter.onrender.com");
 
-        ws.onopen = () => {
-            console.log("✅ Connected to WebSocket");
+        socket.on("connect", () => {
+            console.log("✅ Connected to Socket.IO");
+            socket.emit("message", JSON.stringify({ event: "register_user", user_id: userID }));
+            clearTimeout(reconnectTimeout);
 
-            // Send userID immediately after connecting
-            ws.send(JSON.stringify({
-                event: "register_user",
-                user_id: userID
-            }));
-            console.log(`🔗 Sent userID: ${userID}`);
-        };
+            // Send ping every 30 seconds
+            setInterval(() => {
+                socket.emit("message", JSON.stringify({ event: "ping" }));
+            }, 30000);
+        });
 
-        ws.onmessage = (event) => {
-            const data = JSON.parse(event.data);
-            if (data.event === "bot_message") {
-                currentBotMessage += data.message;
+        socket.on("bot_message", (data) => {
+            console.log("📩 Socket.IO message received:", data);
+            const parsedData = typeof data === "string" ? JSON.parse(data) : data;
+
+            if (parsedData.event === "bot_message") {
+                currentBotMessage += parsedData.message;
                 updateStreamingMessage(currentBotMessage);
-            } else if (data.event === "bot_message_done") {
-                currentBotMessage = "";
-            } else {
-                console.log("Received:", data);
+            } 
+            else if (parsedData.event === "server_response") {
+                appendMessage("bot", parsedData.message);
+            } 
+            else if (parsedData.event === "pong") {
+                console.log("🔄 Connection alive (pong received)");
+            } 
+            else {
+                console.log("⚠️ Unrecognized message:", parsedData);
             }
-        };
+        });
 
-        ws.onclose = () => console.log("❌ WebSocket closed");
+        socket.on("disconnect", () => {
+            console.log("❌ Socket.IO disconnected, attempting to reconnect...");
+            reconnectTimeout = setTimeout(() => {
+                initializeSocketIO();  // Try reconnecting
+            }, 3000);
+        });
+
+        socket.on("connect_error", (error) => {
+            console.error("❌ Socket.IO Error:", error);
+        });
     }
 
     function appendMessage(sender, text) {
@@ -135,7 +154,6 @@
         }
     }
 </script>
-
 
 </body>
 </html>
