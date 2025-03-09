@@ -26,45 +26,20 @@ S3_BUCKET_NAME = "code-interpreter-s3"
 
 appone = Flask(__name__)
 CORS(appone, resources={r"/*": {"origins": "*"}})
+socketio = SocketIO(appone, cors_allowed_origins="*", async_mode="threading")
 
-sock = Sock(appone)
+# sock = Sock(appone)
 
 @appone.route('/')
 def serve_html():
     return send_file('chatinterface.html')  # Serve directly from root folder
 
-pending_messages = []
-
 def stream_to_frontend(event, message):
-    global connected_ws, pending_messages
-
-    if connected_ws:
-        try:
-            connected_ws.send(json.dumps({"event": event, "message": message}))
-            print(f"✅ Sent WebSocket message: {event} → {message}")
-        except Exception as e:
-            print(f"❌ Failed to send message: {e}")
-            pending_messages.append((event, message))  # Store message for later
-    else:
-        print(f"⚠️ WebSocket disconnected, storing message: {event} → {message}")
-        pending_messages.append((event, message))
-
-# Resend pending messages when WebSocket reconnects
-def resend_pending_messages():
-    global connected_ws, pending_messages
-    if connected_ws and pending_messages:
-        print(f"📤 Resending {len(pending_messages)} stored messages...")
-        for event, message in pending_messages:
-            try:
-                connected_ws.send(json.dumps({"event": event, "message": message}))
-                pending_messages.remove((event, message))
-            except:
-                break
-
-
-# ✅ Define Global for WebSocket Connection (single connection handling)
-connected_ws = None
-
+    try:
+        socketio.emit("bot_message", {"event": event, "message": message})
+        # print(f"✅ Sent WebSocket message: {event} → {message}")
+    except Exception as e:
+        print(f"❌ Failed to send WebSocket message: {e}")
 
 # 🟢 Step 1: Define State Schema
 class CodeInterpreterState(TypedDict):
@@ -87,52 +62,28 @@ graph = StateGraph(CodeInterpreterState)
 import threading
 import time
 
-@sock.route('/ws')
+
 def websocket(ws):
-    global connected_ws
-    connected_ws = ws
-    print("✅ WebSocket client connected")
-
-    def send_ping():
-        """ Send periodic pings to keep connection alive. """
-        while connected_ws == ws:
-            try:
-                ws.send(json.dumps({"event": "ping"}))
-                time.sleep(30)  # Send ping every 30 seconds
-            except Exception:
-                break  # Stop sending if WebSocket is closed
-
-    # Start ping thread
-    threading.Thread(target=send_ping, daemon=True).start()
-
+    print(f"📩 WebSocket received: {ws}")
     try:
-        while True:
-            message = ws.receive()
-            if message is None:
-                break
+        data = json.loads(ws) if isinstance(ws, str) else ws
+    except json.JSONDecodeError:
+        print("⚠️ Invalid JSON received.")
+        return
 
-            try:
-                data = json.loads(message)
-            except json.JSONDecodeError:
-                continue  # Ignore invalid messages
+    if data.get("event") == "ping":
+        socketio.emit("pong", {"event": "pong"})  # Send pong response
+        return
 
-            if data.get("event") == "ping":
-                ws.send(json.dumps({"event": "pong"}))  # Respond to pings
-                continue
+    if data.get("event") == "register_user":
+        print(f"✅ User registered with ID: {data.get('user_id')}")
 
-            if data.get("event") == "register_user":
-                user_id = data.get("user_id")
-                print(f"✅ User registered with ID: {user_id}")
+    # Echo message back for debugging
+    socketio.emit("server_response", {"event": "server_response", "message": f"Echo: {data}"})
 
-            print(f"Received message: {message}")
-            ws.send(json.dumps({"event": "server_response", "message": f"Echo: {message}"}))
 
-    except Exception as e:
-        print(f"❌ WebSocket error: {e}")
-    finally:
-        if connected_ws == ws:
-            connected_ws = None
-        print("❌ WebSocket client disconnected")
+    # Echo response for testing
+    socketio.emit("server_response", {"event": "server_response", "message": f"Echo: {data}"})
 
 
 
@@ -306,6 +257,7 @@ def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
     return state
 
 def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
+    stream_to_frontend("bot_message","The following CSV files is/are available:\n")
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     csv_info_text = "The following CSV files is/are available:\n"
@@ -787,6 +739,9 @@ def run_langgraph():
 
 # ✅ Run Flask Server
 if __name__ == '__main__':
-    appone.run(host="0.0.0.0", port=5006, debug=False, use_reloader=False)
+    port = int(os.environ.get("PORT", 5006)) 
+    socketio.run(appone, host="0.0.0.0", port=port, debug=True, allow_unsafe_werkzeug=True)
+
+    # appone.run(host="0.0.0.0", port=5006, debug=False, use_reloader=False)
 # if __name__ == '__main__':
 #     socketio.run(appone, host="localhost", port=5006, debug=True)
