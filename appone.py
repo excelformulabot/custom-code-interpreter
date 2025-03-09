@@ -33,18 +33,33 @@ sock = Sock(appone)
 def serve_html():
     return send_file('chatinterface.html')  # Serve directly from root folder
 
-# Example function to send messages to connected WebSocket clients
+pending_messages = []
+
 def stream_to_frontend(event, message):
-    global connected_ws
+    global connected_ws, pending_messages
+
     if connected_ws:
         try:
             connected_ws.send(json.dumps({"event": event, "message": message}))
-            print(f"✅ Sent message to WebSocket: {event} → {message}")
+            print(f"✅ Sent WebSocket message: {event} → {message}")
         except Exception as e:
-            print(f"❌ Failed to send message to WebSocket: {e}")
-            connected_ws = None  # Reset connection if failed
+            print(f"❌ Failed to send message: {e}")
+            pending_messages.append((event, message))  # Store message for later
     else:
-        print(f"⚠️ No active WebSocket connection. Unable to send: {event} → {message}")
+        print(f"⚠️ WebSocket disconnected, storing message: {event} → {message}")
+        pending_messages.append((event, message))
+
+# Resend pending messages when WebSocket reconnects
+def resend_pending_messages():
+    global connected_ws, pending_messages
+    if connected_ws and pending_messages:
+        print(f"📤 Resending {len(pending_messages)} stored messages...")
+        for event, message in pending_messages:
+            try:
+                connected_ws.send(json.dumps({"event": event, "message": message}))
+                pending_messages.remove((event, message))
+            except:
+                break
 
 
 # ✅ Define Global for WebSocket Connection (single connection handling)
@@ -69,11 +84,26 @@ class CodeInterpreterState(TypedDict):
 graph = StateGraph(CodeInterpreterState)
 
 # ✅ WebSocket Route
+import threading
+import time
+
 @sock.route('/ws')
 def websocket(ws):
     global connected_ws
     connected_ws = ws
     print("✅ WebSocket client connected")
+
+    def send_ping():
+        """ Send periodic pings to keep connection alive. """
+        while connected_ws == ws:
+            try:
+                ws.send(json.dumps({"event": "ping"}))
+                time.sleep(30)  # Send ping every 30 seconds
+            except Exception:
+                break  # Stop sending if WebSocket is closed
+
+    # Start ping thread
+    threading.Thread(target=send_ping, daemon=True).start()
 
     try:
         while True:
@@ -84,10 +114,10 @@ def websocket(ws):
             try:
                 data = json.loads(message)
             except json.JSONDecodeError:
-                continue  # Ignore invalid JSON
+                continue  # Ignore invalid messages
 
             if data.get("event") == "ping":
-                ws.send(json.dumps({"event": "pong"}))  # Keep connection alive
+                ws.send(json.dumps({"event": "pong"}))  # Respond to pings
                 continue
 
             if data.get("event") == "register_user":
@@ -100,7 +130,8 @@ def websocket(ws):
     except Exception as e:
         print(f"❌ WebSocket error: {e}")
     finally:
-        connected_ws = None
+        if connected_ws == ws:
+            connected_ws = None
         print("❌ WebSocket client disconnected")
 
 
