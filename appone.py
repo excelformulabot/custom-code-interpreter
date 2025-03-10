@@ -36,7 +36,7 @@ def serve_html():
 
 def stream_to_frontend(event, message):
     try:
-        socketio.emit({"event": event, "message": message})
+        socketio.emit("bot_message",{"event": event, "message": message})
         print(f"🔥 Emitting: {event} → {message}")
         # print(f"✅ Sent WebSocket message: {event} → {message}")
     except Exception as e:
