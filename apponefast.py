@@ -105,6 +105,32 @@ import polars as pl
 import httpx
 from io import BytesIO
 
+def is_plain_text(text):
+    """
+    Checks if the given text is simple text (not JSON, lists, dictionaries, or structured data).
+    """
+    # Check if text is JSON (if it parses correctly, it's not plain text)
+    try:
+        json.loads(text)
+        return False
+    except (ValueError, TypeError):
+        pass
+
+    # Check if text is a list or dictionary
+    if text.startswith("{") and text.endswith("}") or text.startswith("[") and text.endswith("]"):
+        return False
+
+    # Check if text contains tabular data (dataframes, matrices)
+    if "\n" in text and re.search(r"[-\d.]+\s+[-\d.]+", text):  
+        return False  # Looks like a dataframe/matrix
+
+    # Check for common JSON, dict, or structured output
+    if re.search(r"[:,\[\]\{\}]", text):  # Contains JSON-like structures
+        return False
+
+    # If it’s just words and numbers, it's plain text
+    return True
+
 def read_csv_from_url(url):
     print("read_csv_from_url")
     with httpx.stream("GET", url) as response:
@@ -448,7 +474,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                 stderr_output = None  # Don't treat this as an error
 
             # print(stderr_output)
-            if stdout_output.strip():
+            if stdout_output.strip() and is_plain_text(stdout_output):
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     file_name = f"step{step_index+1}_{timestamp}.txt"
 
