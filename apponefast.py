@@ -292,6 +292,7 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
     {csv_info_text}
 
     ### Guidelines
+    - if the user query is factual(like no. of rows/columns, mean of a particular column, frequency related etc) and may generate a code of just 1-2 lines genrate just 1 or 2 steps.
     - Start with loading the CSV files. Always check the path provided in path provided earlier in the prompt (VVI).
     - Check for missing values and basic inspection, perform this if specified y the user query explicitly OTHERWISE DONT DO THIS.
     - Combine files if necessary.
@@ -373,6 +374,7 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
         The available CSV files/file have the following details & PATHS TO ACCCES THEM ARE ALSO GIVEN PLS USE THEM FURTHUR:
         {csv_info_text}
         Guidelines:
+        - If the user query **requires only a factual response** (e.g., "How many rows?", "What are the column names?"), return a direct answer **inside a print statement**, e.g.:print("<some relevant text>:", <response>)
         - Use polars instead of pandas if the csv has more than 50000 rows,
         - ** If using datframes we usually get this error, keep this in mind, AttributeError: 'DataFrame' object has no attribute 'groupby' and dont use groupby with dataframes **
         - Use the correct sandbox file paths when reading the CSV files.
@@ -431,7 +433,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         print(f"🚀 Running Step {step_index + 1}")
         await stream_to_frontend("bot_message", f"\n🚀 Running Step {step_index + 1}")
         result = sbx.run_code(step_code)
-
+        print("Result: ",result)        
         try:
          # ✅ Extract stdout correctly
             stdout_output = "\n".join(result.logs.stdout) if result.logs.stdout else "✅ Execution completed (no output)"
@@ -446,7 +448,14 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                 stderr_output = None  # Don't treat this as an error
 
             # print(stderr_output)
-        
+            if stdout_output.strip():
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    file_name = f"step{step_index+1}_{timestamp}.txt"
+
+                    # ✅ Upload to S3
+                    s3_url = upload_to_s3_direct(stdout_output.encode(), file_name, S3_BUCKET_NAME)
+                    if s3_url:
+                        await stream_to_frontend("bot_message", f'\n✅ Output saved: {s3_url}')
 
             #print("This is the result:", result)
             if result.error or result.logs.stderr:
