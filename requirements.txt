@@ -24,3 +24,4 @@ eventlet
 gevent
 uvicorn
 fastapi
+python-dotenv==1.0.0
