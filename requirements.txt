@@ -20,3 +20,5 @@ gunicorn==19.7.1
 pyarrow==14.0.2
 numpy==1.26.4
 eventlet==0.36.1
+gevent==24.2.1
+gevent-websocket==0.10.1
