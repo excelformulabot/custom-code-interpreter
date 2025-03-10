@@ -1,46 +1,58 @@
 import os
 import shutil
-from e2b_code_interpreter import Sandbox
-import io
-from flask import Flask
-from flask import Flask, request, jsonify
-import openai
-import time
-import requests
-import pandas as pd
-from typing import TypedDict
 import json
+import httpx
 import base64
-import matplotlib.pyplot as plt
-from PIL import Image
-import re
-from langgraph.graph import StateGraph
-from flask_cors import CORS
-import polars as pl
-from flask_socketio import SocketIO, emit
 import datetime
-from flask_sock import Sock  # ✅ Use Flask-Sock instead of Flask-SocketIO
-from flask import Flask, send_file, request, jsonify
+import requests
+import openai
+import polars as pl
+import pandas as pd
+import boto3
+import re
+from io import BytesIO
+from typing import List, Dict, Optional, TypedDict
+from e2b_code_interpreter import Sandbox
+from langgraph.graph import StateGraph
+from openai import OpenAI
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+import uvicorn
+from fastapi import FastAPI
+from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException
+from pydantic import BaseModel
+from typing import List
+import traceback
+from dotenv import load_dotenv
+load_dotenv()
 
 S3_BUCKET_NAME = "code-interpreter-s3"
 
-appone = Flask(__name__)
-CORS(appone, resources={r"/*": {"origins": "*"}})
-socketio = SocketIO(appone, cors_allowed_origins="*", async_mode="threading")
+apponefast = FastAPI()
+apponefast.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # sock = Sock(appone)
 
-@appone.route('/')
-def serve_html():
-    return send_file('chatinterface.html')  # Serve directly from root folder
+@apponefast.get("/")
+async def serve_html():
+    return FileResponse("chatinterface.html")
 
-def stream_to_frontend(event, message):
-    try:
-        socketio.emit("bot_message",{"event": event, "message": message})
-        print(f"🔥 Emitting: {event} → {message}")
-        # print(f"✅ Sent WebSocket message: {event} → {message}")
-    except Exception as e:
-        print(f"❌ Failed to send WebSocket message: {e}")
+async def stream_to_frontend(event: str, message: str):
+    """Sends messages to the frontend via WebSocket."""
+    if global_websocket:
+        try:
+            await global_websocket.send_text(json.dumps({"event": event, "message": message}))
+        except Exception as e:
+            print(f"❌ WebSocket Error: {e}")
 
 # 🟢 Step 1: Define State Schema
 class CodeInterpreterState(TypedDict):
@@ -62,30 +74,27 @@ graph = StateGraph(CodeInterpreterState)
 # ✅ WebSocket Route
 import threading
 import time
+global_websocket = None  # Stores the WebSocket connection
 
 
-def websocket(ws):
-    print(f"📩 WebSocket received: {ws}")
+@apponefast.websocket("/ws")
+async def websocket_endpoint(websocket: WebSocket):
+    """Handles WebSocket connection & stores it globally."""
+    global global_websocket
+    await websocket.accept()
+    global_websocket = websocket  # ✅ Store WebSocket globally
+
     try:
-        data = json.loads(ws) if isinstance(ws, str) else ws
-    except json.JSONDecodeError:
-        print("⚠️ Invalid JSON received.")
-        return
+        while True:
+            data = await websocket.receive_text()
+            message = json.loads(data)
 
-    if data.get("event") == "ping":
-        socketio.emit("pong", {"event": "pong"})  # Send pong response
-        return
+            if message.get("event") == "ping":
+                await websocket.send_text(json.dumps({"event": "pong"}))
 
-    if data.get("event") == "register_user":
-        print(f"✅ User registered with ID: {data.get('user_id')}")
-
-    # Echo message back for debugging
-    socketio.emit("server_response", {"event": "server_response", "message": f"Echo: {data}"})
-
-
-    # Echo response for testing
-    socketio.emit("server_response", {"event": "server_response", "message": f"Echo: {data}"})
-
+    except WebSocketDisconnect:
+        print("❌ WebSocket Disconnected")
+        global_websocket = None  # ✅ Reset WebSocket on disconnect
 
 
 # 🟢 Step 3: Extract CSV Info and Upload to E2B
@@ -178,10 +187,10 @@ def upload_to_s3_direct(content: bytes, file_name: str, bucket_name: str, s3_fol
         return None
 
 
-def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
+async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
     try:
         # print("extract_csv_info (multiple CSV support)\n")
-        sys.stdout.flush()
+        # sys.stdout.flush()
 
         sbx = Sandbox()
         sbx.commands.run("pip install polars")
@@ -217,7 +226,6 @@ def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
             sample_data = df.head(3).to_pandas().to_string(index=False)
 
             print("Data gathering done")
-            sys.stdout.flush()
 
             # Upload each CSV file to sandbox
             # with open(csv_path, "rb") as f:
@@ -242,13 +250,15 @@ def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
             })
 
             print(csv_info_list)
-            sys.stdout.flush()
-
+            # sys.stdout.flush()
             print(f"Finished Processing file: {csv_path}")
+            print(f"Finished Processing file: {csv_path}")
+            print("hello")
 
         state["csv_info_list"] = csv_info_list
         state["execution_result"] = "✅ All CSV files uploaded and info extracted"
         state["error"] = None
+        print("hello")
 
     except Exception as e:
         print("Got Exception ",e)
@@ -257,8 +267,9 @@ def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
 
     return state
 
-def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
-    stream_to_frontend("bot_message","The following CSV files is/are available:\n")
+async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
+    print("hello gs")
+    # stream_to_frontend("bot_message","The following CSV files is/are available:\n")
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     csv_info_text = "The following CSV files is/are available:\n"
@@ -299,14 +310,14 @@ def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         stream=True
     )
     print("\n🔹 OpenAI Generated Steps:")
-    stream_to_frontend("bot_message", "\n🔹 OpenAI Generated Steps:")
+    await stream_to_frontend("bot_message", "\n🔹 OpenAI Generated Steps:")
     collected_text = ""
     for chunk in response:
         if chunk.choices[0].delta.content is not None:
             partial_text = chunk.choices[0].delta.content
             # print(partial_text, end="", flush=True)  # Stream to terminal
             collected_text += partial_text
-            stream_to_frontend("bot_message", partial_text)
+            await stream_to_frontend("bot_message", partial_text)
 
     # steps_text = response.choices[0].message.content.strip()
     steps_text = collected_text
@@ -328,15 +339,16 @@ def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
 
 
 # 🟢 Step 4: Generate Python Code Using LLM
-def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
+async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
     #print(state["current_step_index"], " This is our step index curently getting executed")
+    print("generate_python_code")
     client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     current_step = state["stepwise_code"][state["current_step_index"]]
     step_description = current_step["description"]
 
     print(f"\n🔵 Fetching Python code for Step {current_step['step']}: {step_description}")
-    stream_to_frontend("bot_message", f"\n\n🔵 Fetching Python code for Step : {step_description}")
+    await stream_to_frontend("bot_message", f"\n\n🔵 Fetching Python code for Step : {step_description}")
 
     csv_info_text = "The following CSV files is/are available:\n"
     for csv_info in state["csv_info_list"]:
@@ -383,7 +395,7 @@ def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
             partial_text = chunk.choices[0].delta.content
             print(partial_text, end="", flush=True)  # Stream to terminal
             collected_text += partial_text
-            stream_to_frontend("bot_message", partial_text)
+            await stream_to_frontend("bot_message", partial_text)
 
     # step_code = response.choices[0].message.content
     step_code = collected_text 
@@ -400,7 +412,7 @@ def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
 
 
 # 🟢 Step 5: Execute Python Code in E2B Sandbox
-def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
+async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
     """Uploads the generated script, executes it inside E2B Sandbox, and downloads result files if available."""
     #print("execute_python_code")
     try:
@@ -417,7 +429,7 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
         step_index = state["current_step_index"]
         step_code = state["current_step_code"]
         print(f"🚀 Running Step {step_index + 1}")
-        stream_to_frontend("bot_message", f"\n🚀 Running Step {step_index + 1}")
+        await stream_to_frontend("bot_message", f"\n🚀 Running Step {step_index + 1}")
         result = sbx.run_code(step_code)
 
         try:
@@ -430,7 +442,7 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
 
             if stderr_output and "UserWarning" in stderr_output:
                 print("⚠️ Detected UserWarning (not a fatal error), continuing execution.")
-                stream_to_frontend("bot_message", "\n⚠️ Detected UserWarning (not a fatal error), continuing execution.")
+                await stream_to_frontend("bot_message", "\n⚠️ Detected UserWarning (not a fatal error), continuing execution.")
                 stderr_output = None  # Don't treat this as an error
 
             # print(stderr_output)
@@ -467,7 +479,7 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
                         partial_text = chunk.choices[0].delta.content
                         print(partial_text, end="", flush=True)  # Stream to terminal
                         collected_text += partial_text
-                        stream_to_frontend("bot_message", partial_text)
+                        await stream_to_frontend("bot_message", partial_text)
                 
                 # print(response.choices[0].message.content)
 
@@ -505,7 +517,7 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
         cleaned_file_paths = [path.strip() for path in raw_output[0].split("\n") if path.strip()]
 
         print("📂 Files found in Sandbox:", cleaned_file_paths)
-        stream_to_frontend("bot_message", f"\n📂 Files found in Sandbox: {cleaned_file_paths}")
+        await stream_to_frontend("bot_message", f"\n📂 Files found in Sandbox: {cleaned_file_paths}")
 
         user_csv_path = cleaned_file_paths[0] if len(cleaned_file_paths) > 0 else ""
         #print(user_csv_path," user_csv_path")
@@ -534,11 +546,11 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
                 file_name = f"step{step_index+1}_{timestamp}.png"
                 s3_url = upload_to_s3_direct(png_bytes, file_name, S3_BUCKET_NAME)
                 if s3_url:
-                    stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
+                    await stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
             else:
                 #print("else hasattr", res, " ", res.png)
                 print(f'⚠️ No PNG found in result {idx+1}, skipping.')
-                stream_to_frontend("bot_message", f'\n⚠️ No PNG found in result {idx+1}, skipping.')
+                await stream_to_frontend("bot_message", f'\n⚠️ No PNG found in result {idx+1}, skipping.')
 
         for file_path in cleaned_file_paths:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -559,17 +571,17 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
                 s3_url = upload_to_s3_direct(content, file_name, S3_BUCKET_NAME)
 
                 if s3_url:
-                    stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
+                    await stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
         
 
             except Exception as e:
                 print(f"⚠️ Error downloading {file_path}: {e}")
-                stream_to_frontend("bot_message", f"\n⚠️ Error downloading {file_path}: {e}")
+                await stream_to_frontend("bot_message", f"\n⚠️ Error downloading {file_path}: {e}")
 
         
     except Exception as e:
         print("Got an exception:", e)
-        stream_to_frontend("bot_message", f"\nGot an exception: {e}")
+        await stream_to_frontend("bot_message", f"\nGot an exception: {e}")
         state["execution_result"] = f"❌ Error executing code in E2B: {str(e)}"
         state["error"] = str(e)
 
@@ -577,7 +589,7 @@ def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
 
 
 # 🟢 Step 6: Auto Debug Python Code if Errors Exist
-def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
+async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
     """Fixes Python errors using OpenAI and retries execution only if an error exists."""
     csv_info_text = "The following CSV files is/are available:\n"
     for csv_info in state["csv_info_list"]:
@@ -591,7 +603,7 @@ def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
     """
     if state["error"]:
         print("\n🔴 ERROR DETECTED! Asking LLM to fix the code...\n")
-        stream_to_frontend("bot_message", "\n🔴 ERROR DETECTED! Asking LLM to fix the code...\n")
+        await stream_to_frontend("bot_message", "\n🔴 ERROR DETECTED! Asking LLM to fix the code...\n")
 
         client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -613,7 +625,7 @@ def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
         """
 
         print(debug_prompt)
-        stream_to_frontend("bot_message", debug_prompt)
+        await stream_to_frontend("bot_message", debug_prompt)
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -627,7 +639,7 @@ def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
                 partial_text = chunk.choices[0].delta.content
                 print(partial_text, end="", flush=True)  # Stream to terminal
                 collected_text += partial_text
-                stream_to_frontend("bot_message", partial_text)
+                await stream_to_frontend("bot_message", partial_text)
         
         # print(response.choices[0].message.content)
         # ✅ Extract Python code using regex
@@ -637,7 +649,7 @@ def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
             #print(f"Fixed Code :\n {fixed_code}")
         else:
             print("⚠️ Warning: LLM response did not contain a valid Python code block. Using raw response.")
-            stream_to_frontend("bot_message", "\n ⚠️ Warning: LLM response did not contain a valid Python code block. Using raw response.")
+            await stream_to_frontend("bot_message", "\n ⚠️ Warning: LLM response did not contain a valid Python code block. Using raw response.")
             fixed_code = response.choices[0].message.content.strip("```python").strip("```")
 
         state["current_step_code"] = fixed_code
@@ -650,11 +662,11 @@ def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
 
     else:
         print("✅ No errors detected. **Stopping execution.**")
-        stream_to_frontend("bot_message", "✅ No errors detected. **Stopping execution.**")
+        await stream_to_frontend("bot_message", "✅ No errors detected. **Stopping execution.**")
         return None  
 
 # 🟢 Step 7: Decision Node to Check for Errors
-def check_for_errors(state: CodeInterpreterState) -> dict:
+async def check_for_errors(state: CodeInterpreterState) -> dict:
     if state["error"]:
         state["next"] = "auto_debug_python_code"
         return {"next": "auto_debug_python_code", "state": state}  # ✅ Return both next and updated state
@@ -672,10 +684,10 @@ def check_for_errors(state: CodeInterpreterState) -> dict:
 
 
 
-def stop_execution(state: CodeInterpreterState) -> dict:
+async def stop_execution(state: CodeInterpreterState) -> dict:
     """Stops execution."""
     print("🛑 Execution stopped successfully.")
-    stream_to_frontend("bot_message", "\n 🛑 Execution stopped successfully.")
+    await stream_to_frontend("bot_message", "\n 🛑 Execution stopped successfully.")
     return {"status": "done", "execution_result": state["execution_result"]}
 
 # ✅ Define Graph Flow
@@ -700,19 +712,17 @@ graph.add_conditional_edges("check_for_errors", lambda state: state["next"], {
     "stop_execution": "stop_execution",
 })
 
+class CodeInterpreterInput(BaseModel):
+    user_query: str
+    csv_file_paths: List[str]
 
 # ✅ Flask API Endpoint
-@appone.route('/run', methods=['POST'])
-def run_langgraph():
+@apponefast.post("/run")
+async def run_langgraph(data: CodeInterpreterInput):
     try:
-        data = request.get_json()
-
-        if not data or "user_query" not in data or "csv_file_paths" not in data:
-            return jsonify({"error": "Missing required fields: 'user_query' and 'csv_file_paths'"}), 400
-
         input_state = {
-            "user_query": data["user_query"],
-            "csv_file_paths": data["csv_file_paths"],  # Expecting list
+            "user_query": data.user_query,
+            "csv_file_paths": data.csv_file_paths,
             "csv_info_list": [],
             "generated_code": "",
             "execution_result": "",
@@ -721,28 +731,32 @@ def run_langgraph():
             "current_step_index": 0,
             "current_step_code": "",
             "stepwise_code": []  # To store all step details (code, description, status)
-
         }
 
+        # ✅ Invoke LangGraph
         executable_graph = graph.compile()
-        output_state = executable_graph.invoke(input_state,{"recursion_limit": 100})
+        output_state = await executable_graph.ainvoke(input_state, {"recursion_limit": 100})  # ✅ Fix
 
-        return jsonify({
+        return {
             "status": "success",
-            "execution_result": output_state["execution_result"],
-            "error": output_state["error"],
-            "code": output_state["generated_code"]
-        })
+            "execution_result": output_state.get("execution_result", ""),  # ✅ Use .get() to avoid KeyErrors
+            "error": output_state.get("error", None),
+            "code": output_state.get("generated_code", "")
+        }
 
     except Exception as e:
-        return jsonify({"status": "error", "message": str(e)}), 500
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ✅ Run Flask Server
-if __name__ == '__main__':
-    port = int(os.environ.get("PORT", 5006)) 
-    socketio.run(appone, host="0.0.0.0", port=port, debug=True, allow_unsafe_werkzeug=True)
+# if __name__ == '__main__':
+#     port = int(os.environ.get("PORT", 5006)) 
+#     socketio.run(appone, host="0.0.0.0", port=port, debug=True, allow_unsafe_werkzeug=True)
 
     # appone.run(host="0.0.0.0", port=5006, debug=False, use_reloader=False)
 # if __name__ == '__main__':
 #     socketio.run(appone, host="localhost", port=5006, debug=True)
+
+if __name__ == "__main__":
+    uvicorn.run(apponefast, host="0.0.0.0", port=int(os.environ.get("PORT", 5006)), log_level="info")
