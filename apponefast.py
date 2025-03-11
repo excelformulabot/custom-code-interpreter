@@ -112,23 +112,28 @@ def is_plain_text(text):
     # Check if text is JSON (if it parses correctly, it's not plain text)
     try:
         json.loads(text)
-        return False
+        print("Failed in json loads")
+        return False    
     except (ValueError, TypeError):
         pass
 
     # Check if text is a list or dictionary
     if text.startswith("{") and text.endswith("}") or text.startswith("[") and text.endswith("]"):
+        print("Failed in { [ ] }")
         return False
 
     # Check if text contains tabular data (dataframes, matrices)
-    if "\n" in text and re.search(r"[-\d.]+\s+[-\d.]+", text):  
+    if re.search(r"[-\d.]+\s+[-\d.]+", text):
+        print("Failed in first")
         return False  # Looks like a dataframe/matrix
-
-    # Check for common JSON, dict, or structured output
-    if re.search(r"[:,\[\]\{\}]", text):  # Contains JSON-like structures
+    
+    if re.search(r"\{.*?:.*?\}|\[.*?\]", text):  # Detects {key:value} or [values]
+        print("Failed in second")
         return False
 
+
     # If it’s just words and numbers, it's plain text
+    print("returned true")
     return True
 
 def read_csv_from_url(url):
@@ -472,14 +477,17 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                 print("⚠️ Detected UserWarning (not a fatal error), continuing execution.")
                 await stream_to_frontend("bot_message", "\n⚠️ Detected UserWarning (not a fatal error), continuing execution.")
                 stderr_output = None  # Don't treat this as an error
+            
+            s3_url = None  # Initialize before using it
+            
+            for log in result.logs.stdout:
+                print(log)
+                if is_plain_text(log):
+                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                    file_name = f"step{step_index+1}_{timestamp}.txt"
 
-            # print(stderr_output)
-            if result.logs.stdout.strip() and is_plain_text(result.logs.stdout):
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_name = f"step{step_index+1}_{timestamp}.txt"
-
-                # ✅ Upload to S3
-                s3_url = upload_to_s3_direct(result.logs.stdout.encode(), file_name, S3_BUCKET_NAME)
+                    # ✅ Upload to S3
+                    s3_url = upload_to_s3_direct(log.encode(), file_name, S3_BUCKET_NAME)
                 if s3_url:
                     await stream_to_frontend("bot_message", f'\n✅ Output saved: {s3_url}')
 
