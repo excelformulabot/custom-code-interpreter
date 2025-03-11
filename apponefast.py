@@ -474,14 +474,14 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                 stderr_output = None  # Don't treat this as an error
 
             # print(stderr_output)
-            if stdout_output.strip() and is_plain_text(stdout_output):
-                    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    file_name = f"step{step_index+1}_{timestamp}.txt"
+            if result.logs.stdout.strip() and is_plain_text(result.logs.stdout):
+                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+                file_name = f"step{step_index+1}_{timestamp}.txt"
 
-                    # ✅ Upload to S3
-                    s3_url = upload_to_s3_direct(stdout_output.encode(), file_name, S3_BUCKET_NAME)
-                    if s3_url:
-                        await stream_to_frontend("bot_message", f'\n✅ Output saved: {s3_url}')
+                # ✅ Upload to S3
+                s3_url = upload_to_s3_direct(result.logs.stdout.encode(), file_name, S3_BUCKET_NAME)
+                if s3_url:
+                    await stream_to_frontend("bot_message", f'\n✅ Output saved: {s3_url}')
 
             #print("This is the result:", result)
             if result.error or result.logs.stderr:
