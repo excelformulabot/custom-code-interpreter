@@ -66,6 +66,8 @@ class CodeInterpreterState(TypedDict):
     current_step_index: int  # Current step being processed
     current_step_code: str  # Current step's code
     stepwise_code: list[dict]  # All steps, each with description, code, status
+    uploaded_files: dict[str, str]  # ✅ Tracks uploaded files (file_path -> S3 URL)
+
 
 
 # 🟢 Step 2: Initialize Langgraph with State
@@ -109,30 +111,31 @@ def is_plain_text(text):
     """
     Checks if the given text is simple text (not JSON, lists, dictionaries, or structured data).
     """
-    # Check if text is JSON (if it parses correctly, it's not plain text)
+
+    # Attempt JSON parsing
     try:
-        json.loads(text)
-        print("Failed in json loads")
-        return False    
+        parsed = json.loads(text)
+        if isinstance(parsed, (dict, list)):  # If it's valid JSON and is dict/list, reject
+            print("Failed in json loads")
+            return False
     except (ValueError, TypeError):
         pass
 
-    # Check if text is a list or dictionary
-    if text.startswith("{") and text.endswith("}") or text.startswith("[") and text.endswith("]"):
+    # Check for explicit dictionary or list indicators at the start and end (likely structured)
+    if text.strip().startswith(("{", "[")) and text.strip().endswith(("}", "]")):
         print("Failed in { [ ] }")
         return False
 
-    # Check if text contains tabular data (dataframes, matrices)
-    if re.search(r"[-\d.]+\s+[-\d.]+", text):
+    # Check for tabular-like structure
+    if re.search(r"[-\d.]+\s+[-\d.]+", text):  # Detects matrix-like numbers
         print("Failed in first")
-        return False  # Looks like a dataframe/matrix
+        return False  
     
-    if re.search(r"\{.*?:.*?\}|\[.*?\]", text):  # Detects {key:value} or [values]
+    # 🔹 **FIXED:** Ignore dictionary-like printed strings, but catch deeply structured JSON
+    if re.search(r"^\{\s*['\"]?\w+['\"]?\s*:\s*['\"]?\w+['\"]?\s*\}$", text.strip()):
         print("Failed in second")
         return False
 
-
-    # If it’s just words and numbers, it's plain text
     print("returned true")
     return True
 
@@ -218,6 +221,41 @@ def upload_to_s3_direct(content: bytes, file_name: str, bucket_name: str, s3_fol
         return None
 
 
+async def generate_csv_description(csv_info):
+    """
+    Uses OpenAI API to generate a short description of the dataset based on column names, data types, and sample data.
+    """
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    prompt = f"""
+    You are a data scientist. Based on the following dataset details, generate a short description (30-50 words) explaining what the dataset likely represents.
+
+    - **File Name**: {csv_info['filename']}
+    - **Columns**: {', '.join(csv_info['column_names'])}
+    - **Data Types**: {', '.join(csv_info['data_types'])}
+    - **Sample Data**:
+    {csv_info['sample_data']}
+    
+    Provide a concise but informative description.
+    """
+
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{"role": "system", "content": "You are a data analysis expert. Give a 50-60 words desciption of the csv based on the details and give a story."},
+                  {"role": "user", "content": prompt}],
+        temperature=0.2,
+        stream=True
+    )
+    
+    collected_text = ""
+    for chunk in response:
+        if chunk.choices[0].delta.content is not None:
+            partial_text = chunk.choices[0].delta.content
+            # print(partial_text, end="", flush=True)  # Stream to terminal
+            collected_text += partial_text
+            await stream_to_frontend("bot_message", partial_text)
+
+    await stream_to_frontend("bot_message", "\n \n")
+
 async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
     try:
         # print("extract_csv_info (multiple CSV support)\n")
@@ -226,6 +264,8 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
         sbx = Sandbox()
         sbx.commands.run("pip install polars")
         sbx.commands.run("pip install pyarrow")
+        sbx.commands.run("pip install mpld3")
+        
         
         state["sandbox"] = sbx
 
@@ -283,13 +323,12 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
             print(csv_info_list)
             # sys.stdout.flush()
             print(f"Finished Processing file: {csv_path}")
-            print(f"Finished Processing file: {csv_path}")
-            print("hello")
 
         state["csv_info_list"] = csv_info_list
         state["execution_result"] = "✅ All CSV files uploaded and info extracted"
         state["error"] = None
-        print("hello")
+        for csv_info in csv_info_list:
+            await generate_csv_description(csv_info)
 
     except Exception as e:
         print("Got Exception ",e)
@@ -315,34 +354,55 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         """
 
     steps_prompt = f"""
-    You are a data analyst assistant. Based on the user's query and the available CSV files, generate a stepwise process for analyzing the data.
-    The user query is:
-    "{state['user_query']}"
+        You are a **data analyst assistant**. Based on the user's query and the available CSV files, generate a **stepwise process** for resolving the user query. 
 
-    The available CSV files have the following details:
-    {csv_info_text}
+        **Tone & Style:**
+        - Keep responses **natural, engaging, and interactive**, like a human assistant who is actively trying to help, keep steps in first person.
+        - Avoid redundancy by ensuring each step serves a unique purpose. 
+        - Vary phrasing to avoid repetition. Instead of starting every step with "I will do this," make it dynamic—sometimes say "Let me check that," "Next, I'll handle...," or "To make sure we get the best results, I'll also..."
+        - Responses should **show effort and care** in solving the user's query.
+        - These generated steps are later translated into Python code—keep this in mind to ensure efficient execution.
+        - Do not generate a step which would result in python code which would do the same code, You need to understand that these steps generate python code and i later run that python code in a sandbox where i dont want any two steps doing same work.
 
-    ### Guidelines
-    - if the user query is factual(like no. of rows/columns, mean of a particular column, frequency related etc) and may generate a code of just 1-2 lines genrate just 1 or 2 steps.
-    - Start with loading the CSV files. Always check the path provided in path provided earlier in the prompt (VVI).
-    - Check for missing values and basic inspection, perform this if specified y the user query explicitly OTHERWISE DONT DO THIS.
-    - Combine files if necessary.
-    - Then, create steps tailored to the user query.
-    - Ensure you only refer to columns that exist.
+        **User Query:**
+        "{state['user_query']}"
 
-    ### Return Format
-    - Only return the numbered list of steps (no explanations or code), DONT CREATE MORE THAN 4-5 STEPS.
+        **Available CSV Files:**
+        {csv_info_text}
+
+        **Guidelines for Step Generation:**
+        - **If the query requires a quick factual lookup** (e.g., row count, column names, basic stats), **generate only 1 step**.
+        - **For slightly more involved queries** (e.g., filtering, computing averages, grouping data), **generate at most 2 steps**.
+        - **DO NOT create extra steps for naming or verifying file saves unless explicitly requested.**
+        - **DO NOT break down simple operations into unnecessary steps.**
+          - If an action can be performed in **one command** (e.g., extracting a column and saving it to CSV), **combine them into a single step**.
+        - **No intermediate steps for creating a new DataFrame unless explicitly required.**
+        - **No repeated steps for saving a file with different names. Only one final saved output is allowed.**
+        - **Avoid unnecessary validation steps** (e.g., confirming a file was saved) unless explicitly required.
+        - If multiple steps are necessary, ensure **each step contributes uniquely** to the solution. No two steps should perform the same or highly similar actions.
+        - Use the above csv sample data to know what columns are there. You dont need a step to get an overview of data structure.
+        - **Keep it concise yet meaningful.** If the query requires only a **quick factual lookup** (e.g., count rows, get column names, calculate mean), generate **just 1-2 steps.**
+        - **Start with loading the necessary CSV files**, always ensuring the correct path is used from the provided details.
+        - **Check for missing values and perform basic inspection ONLY if explicitly requested**—do not add this step unnecessarily.
+        - **Merge datasets if required** to complete the query effectively.
+        - **The steps should align with how Python code will be generated later**, ensuring they lead to efficient execution.
+        - **Do not exceed 4-5 steps**, but also do not force a fixed number—adjust based on query complexity.
+
+        **Return Format:**
+        - Provide only the **numbered list of steps**, keeping them **concise yet clear**.
+        - **Do not generate any code**, only structured steps..
     """
 
+
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[{"role": "system", "content": "You are a data analysis expert."},
                   {"role": "user", "content": steps_prompt}],
         temperature=0.2,
         stream=True
     )
     print("\n🔹 OpenAI Generated Steps:")
-    await stream_to_frontend("bot_message", "\n🔹 OpenAI Generated Steps:")
+    # await stream_to_frontend("bot_message", "\n🔹 OpenAI Generated Steps:")
     collected_text = ""
     for chunk in response:
         if chunk.choices[0].delta.content is not None:
@@ -380,7 +440,7 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
     step_description = current_step["description"]
 
     print(f"\n🔵 Fetching Python code for Step {current_step['step']}: {step_description}")
-    await stream_to_frontend("bot_message", f"\n\n🔵 Fetching Python code for Step : {step_description}")
+    await stream_to_frontend("bot_message", f"\n\n🔵 Fetching Python code ... \n\n Step : {step_description}\n\n")
 
     csv_info_text = "The following CSV files is/are available:\n"
     for csv_info in state["csv_info_list"]:
@@ -396,7 +456,7 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
     step_prompt = f"""
         {csv_info_text}
 
-        User Query:
+        User Query(Just keep this in hindsight, Just give the code for the current step!):
         {state['user_query']}
 
         You are currently working on **Step {state["current_step_index"]}: {step_description}**
@@ -406,17 +466,54 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
         {csv_info_text}
         Guidelines:
         - If the user query **requires only a factual response** (e.g., "How many rows?", "What are the column names?"), return a direct answer **inside a print statement**, e.g.:print("<some relevant text>:", <response>)
-        - Use polars instead of pandas if the csv has more than 50000 rows,
-        - ** If using datframes we usually get this error, keep this in mind, AttributeError: 'DataFrame' object has no attribute 'groupby' and dont use groupby with dataframes **
+        - Use polars instead of pandas if the csv has more than 50000 rows, otherwise use pandas only for creation of dataframe. 
+        - if asked for analysis, give some plots as well.
+        - ** If using datframes we usually get this error, keep this in mind, AttributeError: 'DataFrame' object has no attribute 'groupby' and dont use groupby with dataframes when using polars**
         - Use the correct sandbox file paths when reading the CSV files.
         - Use the same DataFrames across steps (assume they are already defined from previous steps).
         - Do not save matplotlib plots (just show them using plt.show()). Only save plotly visualizations using fig.write_html.
+        - Always set the title of the plot using plt.title(), also same name should be given to the json file as title STRICTLY.
+        ### **For Matplotlib/Seaborn Plots:**
+            - **Show plots using `plt.show()`**.
+            - **For Bar Plots**:
+                - Identify the **highest bar** (peak value).
+                - Identify the **lowest bar** (minimum value).
+                - Calculate the **mean of all values**.
+                - Identify **significant differences between categories**.
+                - Save this extracted data in JSON format to `/home/user/home/atharv/<same as what u gave in plt.title()>.json`
+            - **For Scatter Plots**:
+                - Identify **min/max x values**.
+                - Identify **min/max y values**.
+                - Detect **clusters or outliers**.
+                - Identify **positive/negative/no correlation** between variables.
+                - Save this extracted data in JSON format to `/home/user/home/atharv/<same as what u gave in plt.title()>.json`
+            - **For Line Plots**:
+                - Identify **min/max points**.
+                - Identify **overall trend (increasing, decreasing, fluctuating)**.
+                - Find **points of steepest change**.
+                - Save this extracted data in JSON format to `/home/user/home/atharv/<same as what u gave in plt.title()>.json`
+            - **For Histograms**:
+                - Identify **most frequent range of values**.
+                - Identify **outliers or skewness**.
+                - Save this extracted data in JSON format to `/home/user/home/atharv/<same as what u gave in plt.title()>.json`
+            - **For Box Plots**:
+                - Identify **median, IQR, min, max, outliers**.
+                - Save this extracted data in JSON format to `/home/user/home/atharv/<same as what u gave in plt.title()>.json`
+            - **For Pie Charts**:
+                - Identify **largest and smallest categories**.
+                - Calculate **percentage contribution of each category**.
+                - Save this extracted data in JSON format to `/home/user/home/atharv/<same as what u gave in plt.title()>.json`
+            - **Generate above stats for each plot at the end ad NOT IN A SINGLE JSON FILE BUT IN INDIVIDUAL JSON FILE per plot** 
+            - STRICTLY DONT use THIS plt.savefig()
+            - Do not plot the same plots using plotly and matplotlib, either plot it using matplotlib or plotly.
         - Any intermediate CSV files (like cleaned data) must be saved to /home/user/home/atharv/cleaned_step{state["current_step_index"]}.csv or similar.
-        - Save the summary to /home/user/home/atharv/summary.txt.
+        - ** Some Common errors **
+            - Object of type int64 is not JSON serializable
+        - While writing python code keep this errors in mind, so that you dont write the code which generates above errors.
     """
     print(step_prompt)
     response = client.chat.completions.create(
-        model="gpt-4o",
+        model="gpt-4o-mini",
         messages=[{"role": "system", "content": "You are a Python expert."},
                   {"role": "user", "content": step_prompt}],
         temperature=0.2,
@@ -443,6 +540,89 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
     #print(f"✅ Code fetched for Step {current_step['step']}")
     return state
 
+import boto3
+import json
+import re
+from urllib.parse import urlparse
+
+# Initialize S3 client
+s3_client = boto3.client('s3', region_name='us-east-2', aws_access_key_id=os.getenv("AWS_ACCESS_KEY_ID"),
+        aws_secret_access_key=os.getenv("AWS_SECRET_ACCESS_KEY"))  # Optional if using env variables)
+
+async def get_json_and_generate_description(png_s3_url, bucket_name):
+    """
+    1. Extracts the chart title from the PNG S3 URL.
+    2. Finds the corresponding JSON file in S3.
+    3. Reads the JSON file and sends it to OpenAI for a description.
+    """
+
+    # Step 1: Extract PNG filename from the S3 URL
+    parsed_url = urlparse(png_s3_url)
+    filename = parsed_url.path.split("/")[-1]  # Get only the filename
+    print(f"Extracted PNG filename: {filename}")
+
+    # Step 2: Remove timestamp & step number to get the chart title
+    match = re.match(r"step\d+_\d{8}_\d{6}_(.+)\.\w+$", filename)
+    if not match:
+        print("Filename format doesn't match expected pattern.")
+        return None
+    
+    chart_title = match.group(1)  # Extracts "Survival Rate by Passenger Class"
+    print(f"Extracted Chart Title: {chart_title}")
+
+    # Step 3: Search for JSON file in S3 that matches chart title
+    response = s3_client.list_objects_v2(Bucket=bucket_name, Prefix="results/")
+    if 'Contents' not in response:
+        print("No JSON files found in S3.")
+        return None
+
+    json_file_key = None
+    for obj in response['Contents']:
+        file_key = obj['Key']
+        if chart_title in file_key and file_key.endswith('.json'):
+            json_file_key = file_key
+            break
+
+    if not json_file_key:
+        print("No matching JSON file found in S3.")
+        return None
+
+    print(f"Found JSON file: {json_file_key}")
+
+    # Step 4: Download and read JSON file
+    json_obj = s3_client.get_object(Bucket=bucket_name, Key=json_file_key)
+    json_content = json_obj['Body'].read().decode('utf-8')
+    
+    # Step 5: Generate description using OpenAI
+    description = await generate_plot_description(json_content,chart_title)
+    return description
+
+async def generate_plot_description(json_content,chart_title):
+    """
+    Sends the JSON content to OpenAI ChatCompletion to generate a description.
+    """
+    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    response = client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a data analyst. Summarize the chart description in 30-40 words."},
+            {"role": "user", "content": f"Here's the JSON describing a chart:\n{json_content}\nThis is a chart of {chart_title}. Summarize it in a very interactive way and like a data story"}
+        ],
+        temperature=0.7,
+        max_tokens=100,
+        stream=True
+    )
+    await stream_to_frontend("bot_message", '\n')
+    collected_text = ""
+    for chunk in response:
+        if chunk.choices[0].delta.content is not None:
+            partial_text = chunk.choices[0].delta.content
+            print(partial_text, end="", flush=True)  # Stream to terminal
+            collected_text += partial_text
+            await stream_to_frontend("bot_message", partial_text)
+    print(f"Generated Description: {collected_text}")
+    return collected_text
+
 
 # 🟢 Step 5: Execute Python Code in E2B Sandbox
 async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
@@ -462,7 +642,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         step_index = state["current_step_index"]
         step_code = state["current_step_code"]
         print(f"🚀 Running Step {step_index + 1}")
-        await stream_to_frontend("bot_message", f"\n🚀 Running Step {step_index + 1}")
+        await stream_to_frontend("bot_message", f"\n🚀 Running Step {step_index + 1} in the Sandbox......\n")
         result = sbx.run_code(step_code)
         print("Result: ",result)        
         try:
@@ -470,16 +650,32 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             stdout_output = "\n".join(result.logs.stdout) if result.logs.stdout else "✅ Execution completed (no output)"
             # print(stdout_output)
 
-            # ✅ Extract stderr correctly
-            stderr_output = "\n".join(result.logs.stderr) if result.logs.stderr else None
+            # Extract stderr correctly
+            # Extract stderr output as a single string
+            stderr_output = "\n".join(result.logs.stderr) if result.logs.stderr else ""
 
-            if stderr_output and "UserWarning" in stderr_output:
+            if stderr_output and ("UserWarning" in stderr_output or "FutureWarning" in stderr_output):
                 print("⚠️ Detected UserWarning (not a fatal error), continuing execution.")
                 await stream_to_frontend("bot_message", "\n⚠️ Detected UserWarning (not a fatal error), continuing execution.")
                 stderr_output = None  # Don't treat this as an error
-            
+
+            print(result.error,"<-result error")
+            print(result.logs.stderr,"<-result.logs.stderr error")
+            # Only go inside IF:
+            # - result.error is NOT None (actual error)
+            # - stderr contains something OTHER THAN warnings (actual error messages)
+            if result.error or (result.logs.stderr and not any(warning in result.logs.stderr for warning in ["UserWarning", "FutureWarning", "Warning"])):
+                print("⚠️ Detected Error (fatal error), not continuing execution.")
+                await stream_to_frontend("bot_message", "\n⚠️ Detected Error (fatal error), not continuing execution.")
+                state["error"] = result.error.value if result.error else "\n".join(result.logs.stderr)
+                state["stepwise_code"][step_index]["status"] = "failed"
+                return state  # 🚨 Exit early, don't proceed to file downloads!
+
+
+
+            await stream_to_frontend("bot_message", f"\n🚀 Execution Completed in Sandbox\n\n")
+
             s3_url = None  # Initialize before using it
-            
             for log in result.logs.stdout:
                 print(log)
                 if is_plain_text(log):
@@ -488,41 +684,61 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
                     # ✅ Upload to S3
                     s3_url = upload_to_s3_direct(log.encode(), file_name, S3_BUCKET_NAME)
+
+                    client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+                    await stream_to_frontend("bot_message", f"\n")
+                    response = client.chat.completions.create(
+                        model="gpt-4o-mini",
+                        messages=[
+                            {"role": "system", "content": "You are a text explainer. Summarize the text in 10-20 words."},
+                            {"role": "user", "content": f"Here is the text :\n{log}\nSummarize it briefly. Also talk about the no.s/factual data if present in the text."}
+                        ],
+                        temperature=0.7,
+                        max_tokens=50,
+                        stream=True
+                    )
+                    await stream_to_frontend("bot_message", '\n')
+                    collected_text = ""
+                    for chunk in response:
+                        if chunk.choices[0].delta.content is not None:
+                            partial_text = chunk.choices[0].delta.content
+                            print(partial_text, end="", flush=True)  # Stream to terminal
+                            collected_text += partial_text
+                            await stream_to_frontend("bot_message", partial_text)
+                    print(f"Generated Description: {collected_text}")
+
                 if s3_url:
-                    await stream_to_frontend("bot_message", f'\n✅ Output saved: {s3_url}')
+                    await stream_to_frontend("bot_message", f'\n✅ Output saved: {s3_url}\n')
 
             #print("This is the result:", result)
-            if result.error or result.logs.stderr:
-                state["error"] = result.error.value if result.error else "\n".join(result.logs.stderr)
-                state["stepwise_code"][step_index]["status"] = "failed"
-                #print()
-            else:
-                state["stepwise_code"][step_index]["status"] = "success"
-                state["error"] = None
-                client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                prompt = f"""
-                    Please write a high-level, non-technical summary explaining the following process.
-                    Assume the reader is a business user, not a developer.
-                    Focus on explaining what data was analyzed, what visualizations were created, and any insights that might have been gained.
-                    Here is the process:
-                    {step_code}
 
-                    Please keep the explanation clear and simple in 20-30 words.
-                """
-                response = client.chat.completions.create(
-                    model="gpt-4o",
-                    messages=[{"role": "system", "content": "You are a code explainer."},
-                            {"role": "user", "content": prompt}],
-                    temperature=0.2,
-                    stream=True
-                )
-                collected_text = ""
-                for chunk in response:
-                    if chunk.choices[0].delta.content is not None:
-                        partial_text = chunk.choices[0].delta.content
-                        print(partial_text, end="", flush=True)  # Stream to terminal
-                        collected_text += partial_text
-                        await stream_to_frontend("bot_message", partial_text)
+                #print()
+            state["stepwise_code"][step_index]["status"] = "success"
+            state["error"] = None
+            client = openai.OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+            prompt = f"""
+                Please write a high-level, non-technical summary explaining the following process.
+                Assume the reader is a business user, not a developer.
+                Focus on explaining what data was analyzed, what visualizations were created, and any insights that might have been gained.
+                Here is the process:
+                {step_code}
+
+                Please keep the explanation clear and simple in 20-30 words.
+            """
+            response = client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[{"role": "system", "content": "You are a code explainer."},
+                        {"role": "user", "content": prompt}],
+                temperature=0.2,
+                stream=True
+            )
+            collected_text = ""
+            for chunk in response:
+                if chunk.choices[0].delta.content is not None:
+                    partial_text = chunk.choices[0].delta.content
+                    print(partial_text, end="", flush=True)  # Stream to terminal
+                    collected_text += partial_text
+                    await stream_to_frontend("bot_message", partial_text)
                 
                 # print(response.choices[0].message.content)
 
@@ -560,7 +776,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         cleaned_file_paths = [path.strip() for path in raw_output[0].split("\n") if path.strip()]
 
         print("📂 Files found in Sandbox:", cleaned_file_paths)
-        await stream_to_frontend("bot_message", f"\n📂 Files found in Sandbox: {cleaned_file_paths}")
+        # await stream_to_frontend("bot_message", f"\n📂 Files found in Sandbox: {cleaned_file_paths}")
 
         user_csv_path = cleaned_file_paths[0] if len(cleaned_file_paths) > 0 else ""
         #print(user_csv_path," user_csv_path")
@@ -573,6 +789,79 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
         #print("This is result.results ",result.results)
         #print(len(result.results)," size")
+
+        # Extract csv_info_list from state
+        csv_info_list = state.get("csv_info_list")
+
+        # Extract all CSV sandbox paths for efficient lookup
+        csv_sandbox_paths = {csv_info["sandbox_path"] for csv_info in csv_info_list}
+
+        for file_path in cleaned_file_paths:
+            if not file_path.endswith(".json"):
+                continue  # Skip non-JSON files
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            
+            try:
+                # Read JSON file as binary
+                content = sbx.files.read(file_path)
+                if file_path in csv_sandbox_paths:
+                    continue    
+
+                if isinstance(content, str):
+                    content = content.encode()  # Convert string to bytes if necessary
+
+                orig_file_name = os.path.basename(file_path)
+                file_name = f"step{step_index+1}_{timestamp}_{orig_file_name}"
+                
+                # Direct upload to S3
+                s3_url = upload_to_s3_direct(content, file_name, S3_BUCKET_NAME)
+
+                # if s3_url:
+                #     await stream_to_frontend("bot_message", f'\n✅ Uploaded JSON to S3: {s3_url}')
+            
+            except Exception as e:
+                print(f"⚠️ Error uploading {file_path}: {e}")
+                await stream_to_frontend("bot_message", f"\n⚠️ Error uploading {file_path}: {e}")
+
+        # Second loop: Upload all other files (excluding JSON)
+        for file_path in cleaned_file_paths:
+            print(file_path)
+            if file_path.endswith(".json"):
+                continue  # Skip JSON files
+
+            # ✅ Skip if already uploaded
+            if file_path in state["uploaded_files"]:
+                print(f"⚠️ Skipping {file_path}, already uploaded to S3.")
+                continue
+
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+            try:
+                # Read file as binary
+                content = sbx.files.read(file_path)
+                if file_path in csv_sandbox_paths:
+                    continue    
+                if isinstance(content, str):
+                    content = content.encode()  # Convert string to bytes if necessary
+                print(file_path,"hello1")
+                orig_file_name = os.path.basename(file_path)
+                file_name = f"step{step_index+1}_{timestamp}_{orig_file_name}"
+                print(file_path,"hello2")
+                # Direct upload to S3
+                s3_url = upload_to_s3_direct(content, file_name, S3_BUCKET_NAME)
+
+                if s3_url:
+                    await stream_to_frontend("bot_message", f'\n✅ Uploaded to S3: {s3_url}')
+                    state["uploaded_files"][file_path] = s3_url  # Store S3 URL
+                
+                description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME)
+                print("Final Description:", description)
+            
+            except Exception as e:
+                print(f"⚠️ Error uploading {file_path}: {e}")
+                await stream_to_frontend("bot_message", f"\n⚠️ Error uploading {file_path}: {e}")
+
         for idx, res in enumerate(result.results):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             # local_file_path = os.path.join(local_directory, f"step{step_index+1}_{timestamp}.png")  # Set filename per result
@@ -582,46 +871,32 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                 # print("Inside hasattr", res, " ", res.png)
                 # with open(local_file_path, "wb") as f:
                 #     f.write(base64.b64decode(res.png))
+                # print(type(res))  # Check the type of res
+                # print(dir(res))   # List all attributes of res
+                # print(type(res.data))  # Check the type of res
+                # print(dir(res.data)) 
+                # print(type(res.chart))  # Check the type of res
+                # print(dir(res.chart),"hello")
+                # print(res.chart.title,"hello2")
+                # print(dir(res.chart.elements))
+
                 png_bytes = base64.b64decode(res.png)
                 if not isinstance(png_bytes, (bytes, bytearray)):
                     raise TypeError(f"Decoded content is not bytes. Got: {type(png_bytes)}")
 
-                file_name = f"step{step_index+1}_{timestamp}.png"
+                file_name = f"step{step_index+1}_{timestamp}_{res.chart.title}.png"
                 s3_url = upload_to_s3_direct(png_bytes, file_name, S3_BUCKET_NAME)
+
                 if s3_url:
                     await stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
+
+                description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME)
+                print("Final Description:", description)
+
             else:
                 #print("else hasattr", res, " ", res.png)
                 print(f'⚠️ No PNG found in result {idx+1}, skipping.')
-                await stream_to_frontend("bot_message", f'\n⚠️ No PNG found in result {idx+1}, skipping.')
-
-        for file_path in cleaned_file_paths:
-            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            try:
-                # ✅ Read file as binary
-                #print(file_path,"This is the file path")
-                content = sbx.files.read(file_path)
-                if user_csv_path == file_path:
-                    #print(user_csv_path," user_csv_path in if")
-                    continue
-                if isinstance(content, str):
-                    content = content.encode()  # Convert string to bytes if necessary
-                
-                # file_name = os.path.basename(file_path)
-                original_extension = os.path.splitext(file_path)[1]
-                file_name = f"step{step_index+1}_{timestamp}{original_extension}"
-                # Direct upload to S3
-                s3_url = upload_to_s3_direct(content, file_name, S3_BUCKET_NAME)
-
-                if s3_url:
-                    await stream_to_frontend("bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
-        
-
-            except Exception as e:
-                print(f"⚠️ Error downloading {file_path}: {e}")
-                await stream_to_frontend("bot_message", f"\n⚠️ Error downloading {file_path}: {e}")
-
-        
+                # await stream_to_frontend("bot_message", f'\n⚠️ No PNG found in result {idx+1}, skipping.')
     except Exception as e:
         print("Got an exception:", e)
         await stream_to_frontend("bot_message", f"\nGot an exception: {e}")
@@ -658,6 +933,17 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
         It produced this error:
         ```
         {state['error']}
+
+        ### 🔹 **General Debugging Rules**
+            - If using `polars` and the error is related to `groupby`, replace `.groupby()` with `.group_by()` (Polars uses `.group_by()`, not `.groupby()`).
+            - If `int64` or `float64` serialization errors occur (e.g., **Pydantic warnings**):
+            - Convert `int64` → `int` using `.astype(int)` or `.item()`
+            - Convert `float64` → `float` using `.astype(float)`
+            - If **NaN or inf values** cause JSON issues, fix them:
+            ```python
+            df.replace([np.inf, -np.inf], np.nan, inplace=True)  # Replace infinite values
+            df.fillna(0, inplace=True)  # Fill missing values with 0 (or another default)
+
         ```
         The available CSV files/file have the following details & PATHS TO ACCCES THEM ARE ALSO GIVEN, PLS USE THEM ONLY FURTHUR While debugging:
         ```
@@ -667,8 +953,8 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
         Do NOT provide any explanations, comments, or additional text. Just return clean Python code.
         """
 
-        print(debug_prompt)
-        await stream_to_frontend("bot_message", debug_prompt)
+        # print(debug_prompt)
+        await stream_to_frontend("bot_message", state['error'])
 
         response = client.chat.completions.create(
             model="gpt-4o",
@@ -773,7 +1059,8 @@ async def run_langgraph(data: CodeInterpreterInput):
             "sandbox": None,
             "current_step_index": 0,
             "current_step_code": "",
-            "stepwise_code": []  # To store all step details (code, description, status)
+            "stepwise_code": [], # To store all step details (code, description, status)
+            "uploaded_files": {}
         }
 
         # ✅ Invoke LangGraph
