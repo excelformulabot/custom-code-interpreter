@@ -38,47 +38,47 @@ apponefast.add_middleware(
 
 # sock = Sock(appone)
 import asyncio
-from db import engine
-from models import Base
+# from db import engine
+# from models import Base
 
-async def init_db():
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
+# async def init_db():
+#     async with engine.begin() as conn:
+#         await conn.run_sync(Base.metadata.create_all)
 
 # Run this once at startup
-@apponefast.on_event("startup")
-async def on_startup():
-    await init_db()
+# @apponefast.on_event("startup")
+# async def on_startup():
+#     await init_db()
 
-from db import AsyncSessionLocal
-from models import ChatMessage
+# from db import AsyncSessionLocal
+# from models import ChatMessage
 
-async def save_chat_message(user_id: str, is_ai: bool, message: str, summary: str = ""):
-    async with AsyncSessionLocal() as session:
-        new_msg = ChatMessage(
-            user_id=user_id,
-            ai_message=is_ai,
-            message=message,
-            summary=summary
-        )
-        session.add(new_msg)
-        await session.commit()
+# async def save_chat_message(user_id: str, is_ai: bool, message: str, summary: str = ""):
+#     async with AsyncSessionLocal() as session:
+#         new_msg = ChatMessage(
+#             user_id=user_id,
+#             ai_message=is_ai,
+#             message=message,
+#             summary=summary
+#         )
+#         session.add(new_msg)
+#         await session.commit()
 
-from sqlalchemy.future import select
-from sqlalchemy import desc
-from models import ChatMessage
-from db import AsyncSessionLocal
+# from sqlalchemy.future import select
+# from sqlalchemy import desc
+# from models import ChatMessage
+# from db import AsyncSessionLocal
 
-async def get_last_ai_summaries(user_id: str, limit: int = 3):
-    async with AsyncSessionLocal() as session:
-        result = await session.execute(
-            select(ChatMessage)
-            .where(ChatMessage.user_id == user_id, ChatMessage.ai_message == True)
-            .order_by(desc(ChatMessage.id))
-            .limit(limit)
-        )
-        messages = result.scalars().all()
-        return [msg.summary for msg in messages if msg.summary]
+# async def get_last_ai_summaries(user_id: str, limit: int = 3):
+#     async with AsyncSessionLocal() as session:
+#         result = await session.execute(
+#             select(ChatMessage)
+#             .where(ChatMessage.user_id == user_id, ChatMessage.ai_message == True)
+#             .order_by(desc(ChatMessage.id))
+#             .limit(limit)
+#         )
+#         messages = result.scalars().all()
+#         return [msg.summary for msg in messages if msg.summary]
 
 
 @apponefast.get("/")
@@ -1149,8 +1149,9 @@ class CodeInterpreterInput(BaseModel):
 async def run_langgraph(data: CodeInterpreterInput):
     try:
         # await save_chat_message(user_id="user123", is_ai=False, message="How many survived?", summary="")
-        await save_chat_message(user_id="user123", is_ai=True, message=data.user_query, summary="")
-        summaries = await get_last_ai_summaries("user123")
+        # await save_chat_message(user_id="user123", is_ai=True, message=data.user_query, summary="")
+        # summaries = await get_last_ai_summaries("user123")
+        summaries = []
         input_state = {
             "user_query": data.user_query,
             "csv_file_paths": data.csv_file_paths,
@@ -1235,7 +1236,7 @@ async def run_langgraph(data: CodeInterpreterInput):
         )
         # print(output_state.get("final_response")," hellorvce")
         # print(response.choices[0].message.content)
-        await save_chat_message(user_id="user123", is_ai=True, message=output_state.get("final_response"), summary=response.choices[0].message.content)
+        # await save_chat_message(user_id="user123", is_ai=True, message=output_state.get("final_response"), summary=response.choices[0].message.content)
         list_files_script = """
         import os
 
