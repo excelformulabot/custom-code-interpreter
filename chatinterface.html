@@ -39,7 +39,7 @@
     function initializeWebSocket() {
         console.log("🔄 Connecting to FastAPI WebSocket...");
 
-        ws = new WebSocket(`ws://custom-code-interpreter.onrender.com/ws?user_id=${encodeURIComponent(userId)}`);
+        ws = new WebSocket(`wss://custom-code-interpreter.onrender.com/ws?user_id=${encodeURIComponent(userId)}`);
 
         ws.onopen = function () {
             console.log("✅ WebSocket Connected");
