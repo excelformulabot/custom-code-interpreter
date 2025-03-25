@@ -91,17 +91,25 @@ from typing import Dict
 connected_users: Dict[str, WebSocket] = {}
 
 # ✅ Function to send messages to a specific user
-async def stream_to_frontend(user_id: str, event: str, message: str):
+async def stream_to_frontend(user_id: str, event: str, message):
     """Send messages to a specific user's frontend via WebSocket."""
-    print(f"Sending to {user_id}: {event} => {message[:30]}...")
+    preview = str(message)[:30]
+    print(f"📡 Sending to {user_id}: {event} => {preview}...")
+    
+    if user_id is None:
+        print("⚠️ user_id is None — probably missing in state.")
+        return
+    
     websocket = connected_users.get(user_id)
     if websocket:
         try:
-            await websocket.send_text(json.dumps({"event": event, "message": message}))
+            await websocket.send_text(json.dumps({"event": event, "message": str(message)}))
         except Exception as e:
             print(f"❌ WebSocket Error for {user_id}: {e}")
-            # Remove user on failure
             connected_users.pop(user_id, None)
+    else:
+        print(f"⚠️ No WebSocket connection found for user_id: {user_id}")
+
 
 # 🟢 Step 1: Define State Schema
 class CodeInterpreterState(TypedDict):
