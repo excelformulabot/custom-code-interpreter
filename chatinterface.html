@@ -4,7 +4,7 @@
     <title>CSV Analysis Chat (FastAPI WebSocket + Fetch)</title>
     <style>
         * { box-sizing: border-box; margin: 0; padding: 0; }
-        body { font-family: Arial, sans-serif; background-color: #f4f4f9; height: 100vh; margin: 0; display: flex; justify-content: center; align-items: center; }
+        body { font-family: Arial, sans-serif; background-color: #f4f4f9; height: 100vh; display: flex; justify-content: center; align-items: center; }
         .chat-container { width: 100%; max-width: 1200px; height: 100%; background: white; border-radius: 10px; box-shadow: 0 4px 15px rgba(0, 0, 0, 0.2); display: flex; flex-direction: column; }
         .chat-header { background-color: #007bff; color: white; padding: 15px; text-align: center; font-weight: bold; }
         .chat-messages { flex: 1; padding: 15px; overflow-y: auto; background-color: #f9f9f9; border-top: 1px solid #ddd; border-bottom: 1px solid #ddd; }
@@ -13,7 +13,6 @@
         .bot-message { background-color: #e5e5ea; color: black; align-self: flex-start; margin-right: auto; }
         .chat-input { display: flex; flex-direction: column; padding: 15px; border-top: 1px solid #ddd; background: white; gap: 8px; }
         .chat-input input, .chat-input textarea { padding: 12px; border: 1px solid #ccc; border-radius: 8px; }
-        .chat-input input[type="text"] { flex: 1; }
         .chat-input textarea { height: 80px; resize: none; }
         .chat-input button { background-color: #007bff; color: white; border: none; padding: 12px 18px; border-radius: 8px; cursor: pointer; }
         .chat-input button:hover { background-color: #0056b3; }
@@ -34,18 +33,19 @@
 <script>
     let ws = null;
     let currentBotMessage = "";
+    let chatHistory = [];
+    let userId = "";
 
-    // ✅ Initialize WebSocket Connection
     function initializeWebSocket() {
         console.log("🔄 Connecting to FastAPI WebSocket...");
-        ws = new WebSocket("https://custom-code-interpreter.onrender.com/ws");  // Adjust if using a different backend URL
 
-        ws.onopen = function() {
+        ws = new WebSocket(`https://custom-code-interpreter.onrender.com/ws?user_id=${encodeURIComponent(userId)}`);
+
+        ws.onopen = function () {
             console.log("✅ WebSocket Connected");
         };
 
-        ws.onmessage = function(event) {
-            console.log("📩 WebSocket Message Received:", event.data);
+        ws.onmessage = function (event) {
             const parsedData = JSON.parse(event.data);
 
             if (parsedData.event === "bot_message") {
@@ -55,22 +55,19 @@
                 appendMessage("bot", parsedData.message);
             } else if (parsedData.event === "pong") {
                 console.log("🔄 Connection alive (pong received)");
-            } else {
-                console.log("⚠️ Unrecognized message:", parsedData);
             }
         };
 
-        ws.onclose = function() {
-            console.log("❌ WebSocket Disconnected, attempting to reconnect...");
-            setTimeout(initializeWebSocket, 3000); // Try reconnecting after 3 seconds
+        ws.onclose = function () {
+            console.log("❌ WebSocket Disconnected. Reconnecting...");
+            setTimeout(initializeWebSocket, 3000);
         };
 
-        ws.onerror = function(error) {
-            console.error("❌ WebSocket Error:", error);
+        ws.onerror = function (error) {
+            console.error("WebSocket Error:", error);
         };
     }
 
-    // ✅ Append Messages to Chat Window
     function appendMessage(sender, text) {
         const chatMessages = document.getElementById("chat-messages");
         const messageDiv = document.createElement("div");
@@ -78,14 +75,15 @@
         messageDiv.innerText = text;
         chatMessages.appendChild(messageDiv);
         chatMessages.scrollTop = chatMessages.scrollHeight;
+
+        chatHistory.push({ sender, text });
     }
 
-    // ✅ Update Streaming Message
     function updateStreamingMessage(text) {
         const chatMessages = document.getElementById("chat-messages");
-        let lastMessage = chatMessages.querySelector(".bot-message:last-child");
+        let lastMessage = chatMessages.querySelector(".bot-message[data-streaming='true']");
 
-        if (!lastMessage || lastMessage.getAttribute("data-streaming") !== "true") {
+        if (!lastMessage) {
             lastMessage = document.createElement("div");
             lastMessage.classList.add("message", "bot-message");
             lastMessage.setAttribute("data-streaming", "true");
@@ -96,19 +94,17 @@
         chatMessages.scrollTop = chatMessages.scrollHeight;
     }
 
-    // ✅ Send Message to FastAPI WebSocket
     function sendWebSocketMessage(event, message) {
         if (ws && ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ event: event, message: message }));
+            ws.send(JSON.stringify({ event, message }));
         } else {
             console.error("WebSocket is not connected.");
         }
     }
 
-    // ✅ Send API Request to FastAPI `/run` Endpoint
     async function sendMessage() {
         const userQuery = document.getElementById("user-query").value;
-        const csvUrls = document.getElementById("csv-urls").value.trim().split("\n").map(url => url.trim()).filter(url => url);
+        const csvUrls = document.getElementById("csv-urls").value.trim().split("\n").map(url => url.trim()).filter(Boolean);
 
         if (!userQuery || csvUrls.length === 0) {
             alert("Please enter a query and at least one CSV URL.");
@@ -117,9 +113,13 @@
 
         appendMessage("user", userQuery);
 
+        currentBotMessage = "";
+        document.querySelectorAll('[data-streaming="true"]').forEach(el => el.remove());
+
         const requestData = {
             user_query: userQuery,
-            csv_file_paths: csvUrls
+            csv_file_paths: csvUrls,
+            user_id: userId  // Optionally include in POST if needed
         };
 
         try {
@@ -130,21 +130,29 @@
             });
 
             const data = await response.json();
-            console.log("Run response:", data);
-
             if (data.error) {
                 appendMessage("bot", `Error: ${data.error}`);
             } else {
                 sendWebSocketMessage("bot_message", "Your analysis is being processed...");
             }
         } catch (error) {
-            console.error("Failed to send data:", error);
             appendMessage("bot", "Failed to start analysis.");
+            console.error("Fetch Error:", error);
         }
+
+        document.getElementById("user-query").value = "";
+        document.getElementById("csv-urls").value = "";
     }
 
-    // ✅ Initialize WebSocket on Page Load
-    window.onload = initializeWebSocket;
+    window.onload = function () {
+        userId = prompt("Enter your user ID to begin:");
+        if (!userId) {
+            alert("User ID is required to use the chat.");
+            location.reload();
+        } else {
+            initializeWebSocket();
+        }
+    };
 </script>
 
 </body>
