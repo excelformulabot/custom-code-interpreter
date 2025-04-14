@@ -1283,6 +1283,8 @@ async def run_langgraph(data: CodeInterpreterInput):
         cleaned_file_paths = [path.strip() for path in raw_output[0].split("\n") if path.strip()]
 
         print("📂 Files found in Sandbox:", cleaned_file_paths)
+        
+        await stream_to_frontend(data.chat_id, "completed_stream", "")
 
         return {
             "status": "success",
