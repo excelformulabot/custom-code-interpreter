@@ -127,6 +127,7 @@ class CodeInterpreterState(TypedDict):
     final_response: str
     context: list[str]
     user_id: str
+    chat_id: str
 
 
 # 🟢 Step 2: Initialize Langgraph with State
@@ -1147,10 +1148,26 @@ graph.add_conditional_edges("check_for_errors", lambda state: state["next"], {
     "stop_execution": "stop_execution",
 })
 
+from typing import List, Optional
+
+class AttachedFile(BaseModel):
+    file_name: str
+    url: str
+
+
+class Message(BaseModel):
+    role: str
+    text: str
+    input_files: Optional[List] = []
+    output_files: Optional[List] = []
+
+
 class CodeInterpreterInput(BaseModel):
-    user_query: str
-    csv_file_paths: List[str]
     user_id: str
+    chat_id: str
+    user_query: str
+    attached_files: List[AttachedFile]
+    last_5_messages: List[Message]
 
 # ✅ Flask API Endpoint
 @apponefast.post("/run")
@@ -1162,7 +1179,7 @@ async def run_langgraph(data: CodeInterpreterInput):
         summaries = []
         input_state = {
             "user_query": data.user_query,
-            "csv_file_paths": data.csv_file_paths,
+            "csv_file_paths":[file.url for file in data.attached_files],
             "csv_info_list": [],
             "generated_code": "",
             "execution_result": "",
@@ -1174,7 +1191,8 @@ async def run_langgraph(data: CodeInterpreterInput):
             "uploaded_files": {},
             "final_response": "",
             "context": summaries,
-            "user_id": data.user_id
+            "user_id": data.user_id,
+            "chat_id": data.chat_id
         }
         print(input_state," input_state")
 
