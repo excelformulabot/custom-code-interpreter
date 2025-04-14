@@ -87,28 +87,28 @@ async def serve_html():
 
 from typing import Dict
 
-# ✅ Store active WebSocket connections per user_id
-connected_users: Dict[str, WebSocket] = {}
+# ✅ Store active WebSocket connections per chat_id
+connected_chats: Dict[str, WebSocket] = {}
 
 # ✅ Function to send messages to a specific user
-async def stream_to_frontend(user_id: str, event: str, message):
+async def stream_to_frontend(chat_id: str, event: str, message):
     """Send messages to a specific user's frontend via WebSocket."""
     preview = str(message)[:30]
-    print(f"📡 Sending to {user_id}: {event} => {preview}...")
+    print(f"📡 Sending to {chat_id}: {event} => {preview}...")
     
-    if user_id is None:
-        print("⚠️ user_id is None — probably missing in state.")
+    if chat_id is None:
+        print("⚠️ chat_id is None — probably missing in state.")
         return
     
-    websocket = connected_users.get(user_id)
+    websocket = connected_chats.get(chat_id)
     if websocket:
         try:
             await websocket.send_text(json.dumps({"event": event, "message": str(message)}))
         except Exception as e:
-            print(f"❌ WebSocket Error for {user_id}: {e}")
-            connected_users.pop(user_id, None)
+            print(f"❌ WebSocket Error for {chat_id}: {e}")
+            connected_chats.pop(chat_id, None)
     else:
-        print(f"⚠️ No WebSocket connection found for user_id: {user_id}")
+        print(f"⚠️ No WebSocket connection found for chat_id: {chat_id}")
 
 
 # 🟢 Step 1: Define State Schema
@@ -136,20 +136,20 @@ graph = StateGraph(CodeInterpreterState)
 # ✅ WebSocket Route
 global_websocket = None  # Stores the WebSocket connection
 
-# ✅ WebSocket Route with user_id support
+# ✅ WebSocket Route with chat_id support
 @apponefast.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     """Handles WebSocket connection for a specific user."""
     await websocket.accept()
     
-    user_id = websocket.query_params.get("user_id")
-    if not user_id:
+    chat_id = websocket.query_params.get("chat_id")
+    if not chat_id:
         await websocket.close(code=4001)
-        print("❌ No user_id provided. Connection closed.")
+        print("❌ No chat_id provided. Connection closed.")
         return
 
-    connected_users[user_id] = websocket
-    print(f"✅ WebSocket connected: {user_id}")
+    connected_chats[chat_id] = websocket
+    print(f"✅ WebSocket connected: {chat_id}")
 
     try:
         while True:
@@ -161,11 +161,11 @@ async def websocket_endpoint(websocket: WebSocket):
 
             elif message.get("event") == "bot_message":
                 # You can handle incoming bot_message logic if needed
-                print(f"📩 Received message from {user_id}: {message['message']}")
+                print(f"📩 Received message from {chat_id}: {message['message']}")
 
     except WebSocketDisconnect:
-        print(f"❌ WebSocket Disconnected: {user_id}")
-        connected_users.pop(user_id, None)
+        print(f"❌ WebSocket Disconnected: {chat_id}")
+        connected_chats.pop(chat_id, None)
 
 
 # 🟢 Step 3: Extract CSV Info and Upload to E2B
@@ -295,16 +295,16 @@ async def generate_csv_description(csv_info, state: CodeInterpreterState):
         temperature=0.2,
         stream=True
     )
-    user_id = state.get("user_id")
+    chat_id = state.get("chat_id")
     collected_text = ""
     async for chunk in response:
         if chunk.choices[0].delta.content is not None:
             partial_text = chunk.choices[0].delta.content
             # print(partial_text, end="", flush=True)  # Stream to terminal
             collected_text += partial_text
-            await stream_to_frontend(user_id, "bot_message", partial_text)
+            await stream_to_frontend(chat_id, "bot_message", partial_text)
 
-    await stream_to_frontend(user_id, "bot_message", "\n \n")
+    await stream_to_frontend(chat_id, "bot_message", "\n \n")
     return collected_text
 
 async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
@@ -458,15 +458,15 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
     )
     print("\n🔹 OpenAI Generated Steps:")
     # await stream_to_frontend("bot_message", "\n🔹 OpenAI Generated Steps:")
-    user_id = state.get("user_id")
-    print(user_id," This is the user id")
+    chat_id = state.get("chat_id")
+    print(chat_id," This is the chat_id")
     collected_text = ""
     async for chunk in response:
         if chunk.choices[0].delta.content is not None:
             partial_text = chunk.choices[0].delta.content
             # print(partial_text, end="", flush=True)  # Stream to terminal
             collected_text += partial_text
-            await stream_to_frontend(user_id, "bot_message", partial_text)
+            await stream_to_frontend(chat_id, "bot_message", partial_text)
 
     # steps_text = response.choices[0].message.content.strip()
     steps_text = collected_text
@@ -492,14 +492,14 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
 async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
     #print(state["current_step_index"], " This is our step index curently getting executed")
     print("generate_python_code")
-    user_id = state.get("user_id")
+    chat_id = state.get("chat_id")
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
     current_step = state["stepwise_code"][state["current_step_index"]]
     step_description = current_step["description"]
 
     print(f"\n🔵 Fetching Python code for Step {current_step['step']}: {step_description}")
-    await stream_to_frontend(user_id, "bot_message", f"\n\n🔵 Fetching Python code ... \n\n Step : {step_description}\n\n")
+    await stream_to_frontend(chat_id, "bot_message", f"\n\n🔵 Fetching Python code ... \n\n Step : {step_description}\n\n")
 
     state["final_response"] += f"\n\n🔵 Fetching Python code ... \n\n Step : {step_description}\n\n"
 
@@ -591,7 +591,7 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
             partial_text = chunk.choices[0].delta.content
             print(partial_text, end="", flush=True)  # Stream to terminal
             collected_text += partial_text
-            await stream_to_frontend(user_id, "bot_message", partial_text)
+            await stream_to_frontend(chat_id, "bot_message", partial_text)
 
     # step_code = response.choices[0].message.content
     step_code = collected_text 
@@ -668,7 +668,7 @@ async def generate_plot_description(json_content,chart_title,state: CodeInterpre
     """
     Sends the JSON content to OpenAI ChatCompletion to generate a description.
     """
-    user_id = state.get("user_id")
+    chat_id = state.get("chat_id")
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
@@ -680,14 +680,14 @@ async def generate_plot_description(json_content,chart_title,state: CodeInterpre
         max_tokens=100,
         stream=True
     )
-    await stream_to_frontend(user_id, "bot_message", '\n')
+    await stream_to_frontend(chat_id, "bot_message", '\n')
     collected_text = ""
     async for chunk in response:
         if chunk.choices[0].delta.content is not None:
             partial_text = chunk.choices[0].delta.content
             print(partial_text, end="", flush=True)  # Stream to terminal
             collected_text += partial_text
-            await stream_to_frontend(user_id, "bot_message", partial_text)
+            await stream_to_frontend(chat_id, "bot_message", partial_text)
     print(f"Generated Description: {collected_text}")
     return collected_text
 
@@ -713,7 +713,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
     """Uploads the generated script, executes it inside E2B Sandbox, and downloads result files if available."""
     #print("execute_python_code")
     try:
-        user_id = state.get("user_id")
+        chat_id = state.get("chat_id")
         state["error"] = None  # Reset any previous errors
 
         # ✅ Retrieve the Sandbox instance
@@ -727,7 +727,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         step_index = state["current_step_index"]
         step_code = state["current_step_code"]
         print(f"🚀 Running Step {step_index + 1}")
-        await stream_to_frontend(user_id, "bot_message", f"\n🚀 Running Step {step_index + 1} in the Sandbox......\n")
+        await stream_to_frontend(chat_id, "bot_message", f"\n🚀 Running Step {step_index + 1} in the Sandbox......\n")
         result = sbx.run_code(step_code)
         print("Result: ",result)        
         try:
@@ -741,7 +741,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
             if stderr_output and ("UserWarning" in stderr_output or "FutureWarning" in stderr_output):
                 print("⚠️ Detected UserWarning (not a fatal error), continuing execution.")
-                await stream_to_frontend(user_id, "bot_message", "\n⚠️ Detected UserWarning (not a fatal error), continuing execution.")
+                await stream_to_frontend(chat_id, "bot_message", "\n⚠️ Detected UserWarning (not a fatal error), continuing execution.")
                 stderr_output = None  # Don't treat this as an error
 
             print(result.error,"<-result error")
@@ -754,7 +754,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             # - stderr contains something OTHER THAN warnings (actual error messages)
             if result.error or (result.logs.stderr and not any(warning in line for line in result.logs.stderr for warning in ["UserWarning", "FutureWarning", "Warning"])):
                 print("⚠️ Detected Error (fatal error), not continuing execution.")
-                await stream_to_frontend(user_id, "bot_message", "\n⚠️ Detected Error (fatal error), not continuing execution.")
+                await stream_to_frontend(chat_id, "bot_message", "\n⚠️ Detected Error (fatal error), not continuing execution.")
                 if result.error:
                     state["error"] = convert_to_serializable({
                         "name": result.error.name,        # Error type (e.g., TypeError, ValueError)
@@ -772,7 +772,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
 
 
-            await stream_to_frontend(user_id, "bot_message", f"\n🚀 Execution Completed in Sandbox\n\n")
+            await stream_to_frontend(chat_id, "bot_message", f"\n🚀 Execution Completed in Sandbox\n\n")
 
             s3_url = None  # Initialize before using it
             for log in result.logs.stdout:
@@ -785,7 +785,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                     s3_url = upload_to_s3_direct(log.encode(), file_name, S3_BUCKET_NAME)
 
                     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-                    await stream_to_frontend(user_id, "bot_message", f"\n")
+                    await stream_to_frontend(chat_id, "bot_message", f"\n")
                     response = await client.chat.completions.create(
                         model="gpt-4o-mini",
                         messages=[
@@ -796,19 +796,19 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                         max_tokens=50,
                         stream=True
                     )
-                    await stream_to_frontend(user_id, "bot_message", '\n')
+                    await stream_to_frontend(chat_id, "bot_message", '\n')
                     collected_text = ""
                     async for chunk in response:
                         if chunk.choices[0].delta.content is not None:
                             partial_text = chunk.choices[0].delta.content
                             print(partial_text, end="", flush=True)  # Stream to terminal
                             collected_text += partial_text
-                            await stream_to_frontend(user_id, "bot_message", partial_text)
+                            await stream_to_frontend(chat_id, "bot_message", partial_text)
                     print(f"Generated Description: {collected_text}")
                     state["final_response"] += collected_text
 
                 if s3_url:
-                    await stream_to_frontend(user_id, "bot_message", f'\n✅ Output saved: {s3_url}\n')
+                    await stream_to_frontend(chat_id, "bot_message", f'\n✅ Output saved: {s3_url}\n')
                     state["final_response"] += f'\n✅ Output saved: {s3_url}\n'
 
             #print("This is the result:", result)
@@ -839,7 +839,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                     partial_text = chunk.choices[0].delta.content
                     print(partial_text, end="", flush=True)  # Stream to terminal
                     collected_text += partial_text
-                    await stream_to_frontend(user_id, "bot_message", partial_text)
+                    await stream_to_frontend(chat_id, "bot_message", partial_text)
             
             state["final_response"] += collected_text
                 # print(response.choices[0].message.content)
@@ -878,7 +878,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         cleaned_file_paths = [path.strip() for path in raw_output[0].split("\n") if path.strip()]
 
         print("📂 Files found in Sandbox:", cleaned_file_paths)
-        # await stream_to_frontend(user_id, "bot_message", f"\n📂 Files found in Sandbox: {cleaned_file_paths}")
+        # await stream_to_frontend(chat_id, "bot_message", f"\n📂 Files found in Sandbox: {cleaned_file_paths}")
 
         user_csv_path = cleaned_file_paths[0] if len(cleaned_file_paths) > 0 else ""
         #print(user_csv_path," user_csv_path")
@@ -921,11 +921,11 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
                 if s3_url:
                     state["final_response"] += f'\n✅ Uploaded JSON to S3: {s3_url}'
-                    # await stream_to_frontend(user_id, "bot_message", f'\n✅ Uploaded JSON to S3: {s3_url}')
+                    # await stream_to_frontend(chat_id, "bot_message", f'\n✅ Uploaded JSON to S3: {s3_url}')
             
             except Exception as e:
                 print(f"⚠️ Error uploading {file_path}: {e}")
-                await stream_to_frontend(user_id, "bot_message", f"\n⚠️ Error uploading {file_path}: {e}")
+                await stream_to_frontend(chat_id, "bot_message", f"\n⚠️ Error uploading {file_path}: {e}")
 
         # Second loop: Upload all other files (excluding JSON)
         for file_path in cleaned_file_paths:
@@ -956,7 +956,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
                 if s3_url:
                     state["final_response"] += f'\n✅ Uploaded to S3: {s3_url}'
-                    await stream_to_frontend(user_id, "bot_message", f'\n✅ Uploaded to S3: {s3_url}')
+                    await stream_to_frontend(chat_id, "bot_message", f'\n✅ Uploaded to S3: {s3_url}')
                     state["uploaded_files"][file_path] = s3_url  # Store S3 URL
                 
                 description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
@@ -965,7 +965,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             
             except Exception as e:
                 print(f"⚠️ Error uploading {file_path}: {e}")
-                await stream_to_frontend(user_id, "bot_message", f"\n⚠️ Error uploading {file_path}: {e}")
+                await stream_to_frontend(chat_id, "bot_message", f"\n⚠️ Error uploading {file_path}: {e}")
 
         for idx, res in enumerate(result.results):
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -994,7 +994,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
                 if s3_url:
                     state["final_response"] += f'\n✅ Uploaded directly to S3: {s3_url}'
-                    await stream_to_frontend(user_id, "bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
+                    await stream_to_frontend(chat_id, "bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
 
                 description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
                 print("Final Description:", description)
@@ -1003,10 +1003,10 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             else:
                 #print("else hasattr", res, " ", res.png)
                 print(f'⚠️ No PNG found in result {idx+1}, skipping.')
-                # await stream_to_frontend(user_id, "bot_message", f'\n⚠️ No PNG found in result {idx+1}, skipping.')
+                # await stream_to_frontend(chat_id, "bot_message", f'\n⚠️ No PNG found in result {idx+1}, skipping.')
     except Exception as e:
         print("Got an exception:", e)
-        await stream_to_frontend(user_id, "bot_message", f"\nGot an exception: {e}")
+        await stream_to_frontend(chat_id, "bot_message", f"\nGot an exception: {e}")
         state["execution_result"] = f"❌ Error executing code in E2B: {str(e)}"
         state["error"] = str(e)
 
@@ -1016,7 +1016,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 # 🟢 Step 6: Auto Debug Python Code if Errors Exist
 async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreterState:
     """Fixes Python errors using OpenAI and retries execution only if an error exists."""
-    user_id = state.get("user_id")
+    chat_id = state.get("chat_id")
     csv_info_text = "The following CSV files is/are available:\n"
     for csv_info in state["csv_info_list"]:
         csv_info_text += f"""
@@ -1029,7 +1029,7 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
     """
     if state["error"]:
         print("\n🔴 ERROR DETECTED! Asking LLM to fix the code...\n")
-        await stream_to_frontend(user_id, "bot_message", "\n🔴 ERROR DETECTED! Asking LLM to fix the code...\n")
+        await stream_to_frontend(chat_id, "bot_message", "\n🔴 ERROR DETECTED! Asking LLM to fix the code...\n")
 
         client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 
@@ -1062,7 +1062,7 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
         """
 
         print(debug_prompt)
-        await stream_to_frontend(user_id, "bot_message", state['error'])
+        await stream_to_frontend(chat_id, "bot_message", state['error'])
 
         response = await client.chat.completions.create(
             model="gpt-4o",
@@ -1076,7 +1076,7 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
                 partial_text = chunk.choices[0].delta.content
                 print(partial_text, end="", flush=True)  # Stream to terminal
                 collected_text += partial_text
-                await stream_to_frontend(user_id, "bot_message", partial_text)
+                await stream_to_frontend(chat_id, "bot_message", partial_text)
         
         # print(response.choices[0].message.content)
         # ✅ Extract Python code using regex
@@ -1086,7 +1086,7 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
             #print(f"Fixed Code :\n {fixed_code}")
         else:
             print("⚠️ Warning: LLM response did not contain a valid Python code block. Using raw response.")
-            await stream_to_frontend(user_id, "bot_message", "\n ⚠️ Warning: LLM response did not contain a valid Python code block. Using raw response.")
+            await stream_to_frontend(chat_id, "bot_message", "\n ⚠️ Warning: LLM response did not contain a valid Python code block. Using raw response.")
             fixed_code = response.choices[0].message.content.strip("```python").strip("```")
 
         state["current_step_code"] = fixed_code
@@ -1099,7 +1099,7 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
 
     else:
         print("✅ No errors detected. **Stopping execution.**")
-        await stream_to_frontend(user_id, "bot_message", "✅ No errors detected. **Stopping execution.**")
+        await stream_to_frontend(chat_id, "bot_message", "✅ No errors detected. **Stopping execution.**")
         return None  
 
 # 🟢 Step 7: Decision Node to Check for Errors
@@ -1121,9 +1121,9 @@ async def check_for_errors(state: CodeInterpreterState) -> dict:
 
 async def stop_execution(state: CodeInterpreterState) -> dict:
     """Stops execution."""
-    user_id = state.get("user_id")
+    chat_id = state.get("chat_id")
     print("🛑 Execution stopped successfully.")
-    await stream_to_frontend(user_id, "bot_message", "\n 🛑 Execution stopped successfully.")
+    await stream_to_frontend(chat_id, "bot_message", "\n 🛑 Execution stopped successfully.")
     return {"status": "done", "execution_result": state["execution_result"]}
 
 # ✅ Define Graph Flow
