@@ -36,51 +36,6 @@ apponefast.add_middleware(
     allow_headers=["*"],
 )
 
-# sock = Sock(appone)
-import asyncio
-# from db import engine
-# from models import Base
-
-# async def init_db():
-#     async with engine.begin() as conn:
-#         await conn.run_sync(Base.metadata.create_all)
-
-# Run this once at startup
-# @apponefast.on_event("startup")
-# async def on_startup():
-#     await init_db()
-
-# from db import AsyncSessionLocal
-# from models import ChatMessage
-
-# async def save_chat_message(user_id: str, is_ai: bool, message: str, summary: str = ""):
-#     async with AsyncSessionLocal() as session:
-#         new_msg = ChatMessage(
-#             user_id=user_id,
-#             ai_message=is_ai,
-#             message=message,
-#             summary=summary
-#         )
-#         session.add(new_msg)
-#         await session.commit()
-
-# from sqlalchemy.future import select
-# from sqlalchemy import desc
-# from models import ChatMessage
-# from db import AsyncSessionLocal
-
-# async def get_last_ai_summaries(user_id: str, limit: int = 3):
-#     async with AsyncSessionLocal() as session:
-#         result = await session.execute(
-#             select(ChatMessage)
-#             .where(ChatMessage.user_id == user_id, ChatMessage.ai_message == True)
-#             .order_by(desc(ChatMessage.id))
-#             .limit(limit)
-#         )
-#         messages = result.scalars().all()
-#         return [msg.summary for msg in messages if msg.summary]
-
-
 @apponefast.get("/")
 async def serve_html():
     return FileResponse("chatinterface.html")
@@ -128,6 +83,7 @@ class CodeInterpreterState(TypedDict):
     context: list[str]
     user_id: str
     chat_id: str
+    steps: str
 
 
 # 🟢 Step 2: Initialize Langgraph with State
@@ -229,21 +185,25 @@ import os
 import httpx
 from e2b_code_interpreter import Sandbox
 
+from io import BytesIO
+
 def download_file_to_sandbox(sbx: Sandbox, url: str, sandbox_folder: str = "home/atharv"):
-    """ Download file from URL and write it directly to the sandbox. """
     filename = os.path.basename(url)
-
-    # ✅ Fetch file from URL
-    response = httpx.get(url)
-    if response.status_code != 200:
-        raise Exception(f"Failed to download {url}, status: {response.status_code}")
-
-    # ✅ Write directly to sandbox without processing
     sandbox_path = f"{sandbox_folder}/{filename}"
-    sbx.files.write(sandbox_path, response.content)
+    full_path = f"/home/user/{sandbox_path}"
 
-    # ✅ Return the sandbox path for reference
-    return f"/home/user/{sandbox_path}"
+    timeout = httpx.Timeout(30.0, read=30.0, connect=10.0)
+    with httpx.stream("GET", url, timeout=timeout) as response:
+        if response.status_code != 200:
+            raise Exception(f"Failed to download {url}, status: {response.status_code}")
+        buffer = BytesIO()
+        for chunk in response.iter_bytes():
+            buffer.write(chunk)
+        buffer.seek(0)
+        sbx.files.write(sandbox_path, buffer.read())  # write bytes to sandbox
+
+    return full_path
+
 
 
 def upload_to_s3_direct(content: bytes, file_name: str, bucket_name: str, s3_folder="results"):
@@ -308,93 +268,178 @@ async def generate_csv_description(csv_info, state: CodeInterpreterState):
     return collected_text
 
 async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
-    try:
-        # print("extract_csv_info (multiple CSV support)\n")
-        # sys.stdout.flush()
 
-        sbx = Sandbox()
-        sbx.commands.run("pip install polars")
-        sbx.commands.run("pip install pyarrow")
-        sbx.commands.run("pip install mpld3")
-        
-        
-        state["sandbox"] = sbx
+    if (not state.get("csv_file_paths")) and (state.get("csv_info_list")):
+        print("✅ No new CSV files and existing CSV info found. Skipping extraction.")
+        return state
 
-        csv_info_list = []
-        sandbox_paths = []
+    print("🚀 New CSVs detected or no existing info. Processing CSVs now...")
 
-        for csv_path in state["csv_file_paths"]:
-            print(f"Processing file: {csv_path}")
+
+    max_retries = 5  # Set a maximum retry limit to avoid infinite loop
+    retry_count = 0
     
-            # Read with Polars
-            # df = pl.read_csv(csv_path)
-            if csv_path.startswith("http"):
-                df = read_csv_from_url(csv_path)
-            else:
-                df = pl.read_csv(csv_path)
+    while retry_count < max_retries:
+        try:
+            # Start retry loop
+            sbx = Sandbox()
+            sbx.commands.run("pip install polars")
+            sbx.commands.run("pip install pyarrow")
+            sbx.commands.run("pip install mpld3")
+            
+            state["sandbox"] = sbx
 
-            print(f"Created Dataframes for file: {csv_path}")
-            # Extract column names directly (Polars already gives a list)
-            # print(df)
-            column_names = df.columns
+            csv_info_list = []
+            sandbox_paths = []
 
-            # Number of rows
-            num_rows = df.height  # 'height' is the row count in Polars
+            for csv_path in state["csv_file_paths"]:
+                print(f"Processing file: {csv_path}")
+        
+                # Read with Polars
+                if csv_path.startswith("http"):
+                    df = read_csv_from_url(csv_path)
+                else:
+                    df = pl.read_csv(csv_path)
 
-            # Data types as dictionary
-            data_types = {col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)}
+                print(f"Created Dataframes for file: {csv_path}")
+                column_names = df.columns
+                num_rows = df.height  # 'height' is the row count in Polars
+                data_types = {col: str(dtype) for col, dtype in zip(df.columns, df.dtypes)}
+                sample_data = df.head(3).to_pandas().to_string(index=False)
 
-            # Sample data (convert to Pandas just to generate string output)
-            sample_data = df.head(3).to_pandas().to_string(index=False)
+                print("Data gathering done")
 
-            print("Data gathering done")
+                # Upload each CSV file to sandbox 
+                if csv_path.startswith("http"):
+                    sandbox_path = download_file_to_sandbox(sbx, csv_path)
+                    sandbox_paths.append(sandbox_path)
+                else:
+                    with open(csv_path, "rb") as f:
+                        sandbox_path = sbx.files.write(f"home/atharv/{os.path.basename(csv_path)}", f)
+                    sandbox_paths.append(f"/home/user/home/atharv/{os.path.basename(csv_path)}")
 
-            # Upload each CSV file to sandbox 
-            # with open(csv_path, "rb") as f:
-            if csv_path.startswith("http"):
-                # Skip uploading for URLs
-                sandbox_path = download_file_to_sandbox(sbx, csv_path)
-                sandbox_paths.append(sandbox_path)
-            else:
-                # Upload to sandbox for local files
-                with open(csv_path, "rb") as f:
-                    sandbox_path = sbx.files.write(f"home/atharv/{os.path.basename(csv_path)}", f)
-                sandbox_paths.append(f"/home/user/home/atharv/{os.path.basename(csv_path)}")
+                print("Sandbox paths: ", sandbox_paths[-1])
+                csv_info_list.append({
+                    "filename": os.path.basename(csv_path),
+                    "sandbox_path": sandbox_paths[-1],
+                    "column_names": column_names,
+                    "num_rows": num_rows,
+                    "data_types": data_types,
+                    "sample_data": sample_data
+                })
 
-            print("Sandbox paths: ",sandbox_paths[-1])
-            csv_info_list.append({
-                "filename": os.path.basename(csv_path),
-                "sandbox_path": sandbox_paths[-1],
-                "column_names": column_names,
-                "num_rows": num_rows,
-                "data_types": data_types,
-                "sample_data": sample_data
-            })
+                print(f"Finished Processing file: {csv_path}")
 
-            print(csv_info_list)
-            # sys.stdout.flush()
-            print(f"Finished Processing file: {csv_path}")
+            state["csv_info_list"] = csv_info_list
+            state["execution_result"] = "✅ All CSV files uploaded and info extracted"
+            state["error"] = None
 
-        state["csv_info_list"] = csv_info_list
-        state["execution_result"] = "✅ All CSV files uploaded and info extracted"
-        state["error"] = None
-        for csv_info in csv_info_list:
-            collected_text = await generate_csv_description(csv_info, state)
-            state["final_response"] += collected_text
+            # Generate descriptions for each CSV
+            for csv_info in csv_info_list:
+                collected_text = await generate_csv_description(csv_info, state)
+                state["final_response"] += collected_text
 
-    except Exception as e:
-        print("Got Exception ",e)
-        state["execution_result"] = f"❌ Error processing CSV files: {str(e)}"
-        state["error"] = str(e)
+            # No exception, exit the loop
+            break
+
+        except Exception as e:
+            print(f"❌ Error processing CSV files: {str(e)}. Retrying... ({retry_count + 1}/{max_retries})")
+            state["execution_result"] = f"❌ Error processing CSV files: {str(e)}"
+            state["error"] = str(e)
+            retry_count += 1
+            if retry_count >= max_retries:
+                print("❌ Maximum retries reached. Exiting.")
+                state["execution_result"] = "❌ Maximum retries reached. Task failed."
+                break
+    
+    print()
 
     return state
+
 
 async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
     print("hello gs")
     # stream_to_frontend("bot_message","The following CSV files is/are available:\n")
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    chat_id = state.get("chat_id")
+    csv_schema_text = ""
+    for i, csv_info in enumerate(state["csv_info_list"], start=1):
+        csv_schema_text += f"""
+        CSV {i}:
+        - File: {csv_info['filename']}
+        - Columns: {csv_info['column_names']}
+        """
 
-    csv_info_text = "The following CSV files is/are available:\n"
+    classification_prompt = f"""
+        A user has submitted the following query:
+        "{state['user_query']}"
+
+        They uploaded the following CSV files:
+        {csv_schema_text}
+
+        Please classify the query into one of the following:
+        - simple_fact
+        - moderate_analysis
+        - complex_analysis
+        - unrelated
+
+        Only return one of the four labels above.
+    """
+    classification_response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[{
+            "role": "system", "content": "You are a query classifier for a data assistant."
+        }, {
+            "role": "user", "content": classification_prompt
+        }]
+    )
+    query_type = classification_response.choices[0].message.content.strip().lower()
+    print(f"🔍 Query Type: {query_type}")
+
+    if query_type not in ["simple_fact", "moderate_analysis", "complex_analysis", "unrelated"]:
+        query_type = "moderate_analysis"  # fallback
+
+    if query_type == "unrelated":
+        # Generate a natural response via OpenAI
+        chat_prompt = f"""
+        A user has uploaded a CSV file but asked the following question instead:
+
+        "{state['user_query']}"
+
+        This question is unrelated to data analysis. Please respond in a kind, conversational tone as a friendly assistant. Keep it short and warm, like you're chatting with a curious user. Don't reference CSVs unless they bring it up again.
+        """
+
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a warm and witty assistant that chats casually with users."},
+                {"role": "user", "content": chat_prompt}
+            ],
+            temperature=0.8,
+            stream=True
+        )
+
+        collected_text = ""
+        async for chunk in response:
+            if chunk.choices[0].delta.content:
+                partial_text = chunk.choices[0].delta.content
+                collected_text += partial_text
+                await stream_to_frontend(chat_id, "bot_message", partial_text)
+
+        state["final_response"] += collected_text
+        state["stepwise_code"] = []  # No code steps to run
+        state["current_step_code"] = ""
+        state["current_step_index"] = 0
+        return state
+
+    num_steps_instruction = {
+        "simple_fact": "generate **1 step** (loading dataset and resolving query).",
+        "moderate_analysis": "generate **up to 2 steps**.",
+        "complex_analysis": "generate **3-5 steps**, only if needed.",
+    }[query_type]
+
+
+    csv_info_text = "The following CSV files is/are available:\n"   
     for csv_info in state["csv_info_list"]:
         csv_info_text += f"""
         - **File:** {csv_info['filename']}
@@ -409,12 +454,23 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         You are a **data analyst assistant**. Based on the user's query and the available CSV files, generate a **stepwise process** for resolving the user query. 
 
         **Tone & Style:**
+        - Be natural and engaging, keeping steps concise and to the point.
         - Keep responses **natural, engaging, and interactive**, like a human assistant who is actively trying to help, keep steps in first person.
-        - Avoid redundancy by ensuring each step serves a unique purpose. 
+        - Avoid redundancy. If the query can be answered in **one step**, do so efficiently.
+        - Ensure that the steps will be executed in **Python** and will work in the same sandbox environment to maintain state across steps.
         - Vary phrasing to avoid repetition. Instead of starting every step with "I will do this," make it dynamic—sometimes say "Let me check that," "Next, I'll handle...," or "To make sure we get the best results, I'll also..."
-        - Responses should **show effort and care** in solving the user's query.
-        - These generated steps are later translated into Python code—keep this in mind to ensure efficient execution.
-        - Do not generate a step which would result in python code which would do the same code, You need to understand that these steps generate python code and i later run that python code in a sandbox where i dont want any two steps doing same work.
+        - For **simple fact queries**, generate **only 1 step**, combining dataset loading and query resolution in one go.
+            - For example, if the query asks for row count, combine loading and counting rows in one step.
+        - For **moderate analysis**, generate **1 step**, combining data loading, processing, and analysis in one step.
+        - For **complex analysis**, generate **2-5 steps**, only if necessary. The task should be broken down into **distinct, actionable steps** with no redundant operations.
+            - Ensure each step is unique and doesn't repeat work already done (like reloading data).
+        - Avoid unnecessary steps like saving files unless explicitly requested.
+        - If the task is simple (like counting rows), only one step is needed.
+        - Combine dataset loading and simple analysis into one step if possible.
+        - Ensure each step contributes to the resolution of the query and that the steps are actionable in Python.
+        - Each new step **must build upon previous steps**, using the same sandbox environment.
+        - If multiple steps are necessary, ensure they are logically distinct and non-repetitive.
+
 
         **Previous context (summaries of earlier tasks, use this in response if required):**
         {chr(10).join(f"- {ctx}" for ctx in state.get("context", []) if ctx)}
@@ -426,22 +482,13 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         {csv_info_text}
 
         **Guidelines for Step Generation:**
-        - **If the query requires a quick factual lookup** (e.g., row count, column names, basic stats), **generate only 1 step**.
-        - **For slightly more involved queries** (e.g., filtering, computing averages, grouping data), **generate at most 2 steps**.
-        - **DO NOT create extra steps for naming or verifying file saves unless explicitly requested.**
-        - **DO NOT break down simple operations into unnecessary steps.**
-          - If an action can be performed in **one command** (e.g., extracting a column and saving it to CSV), **combine them into a single step**.
-        - **No intermediate steps for creating a new DataFrame unless explicitly required.**
-        - **No repeated steps for saving a file with different names. Only one final saved output is allowed.**
-        - **Avoid unnecessary validation steps** (e.g., confirming a file was saved) unless explicitly required.
-        - If multiple steps are necessary, ensure **each step contributes uniquely** to the solution. No two steps should perform the same or highly similar actions.
-        - Use the above csv sample data to know what columns are there. You dont need a step to get an overview of data structure.
-        - **Keep it concise yet meaningful.** If the query requires only a **quick factual lookup** (e.g., count rows, get column names, calculate mean), generate **just 1-2 steps.**
-        - **Start with loading the necessary CSV files**, always ensuring the correct path is used from the provided details.
-        - **Check for missing values and perform basic inspection ONLY if explicitly requested**—do not add this step unnecessarily.
-        - **Merge datasets if required** to complete the query effectively.
-        - **The steps should align with how Python code will be generated later**, ensuring they lead to efficient execution.
-        - **Do not exceed 4-5 steps**, but also do not force a fixed number—adjust based on query complexity.
+        - For **simple fact queries**, combine dataset loading and the task into **one step**.
+        - For **moderate analysis**, generate **1 step** to cover dataset loading, processing, and analysis.
+        - For **complex analysis**, generate **2–5 steps** only if necessary. 
+        - Each step must be **logically distinct** and should avoid repeating operations.
+        - **Avoid adding steps just to display or summarize outputs**, like “finally show the plots” — assume outputs are displayed inline with analysis steps.
+        - Avoid steps like “generate visualizations” AND then another step “display visualizations.” These should be combined.
+        - Only include a new step if it introduces new logic, computation, or visualization — not just to summarize or repeat.
 
         **Return Format:**
         - Provide only the **numbered list of steps**, keeping them **concise yet clear**.
@@ -458,7 +505,7 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
     )
     print("\n🔹 OpenAI Generated Steps:")
     # await stream_to_frontend("bot_message", "\n🔹 OpenAI Generated Steps:")
-    chat_id = state.get("chat_id")
+    
     print(chat_id," This is the chat_id")
     collected_text = ""
     async for chunk in response:
@@ -470,6 +517,7 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
 
     # steps_text = response.choices[0].message.content.strip()
     steps_text = collected_text
+    state["steps"] = collected_text
     state["final_response"] += collected_text
     steps = [line.strip() for line in steps_text.split("\n") if line.strip() and re.match(r"^\d+\.", line)]
     # print("\n🔹 OpenAI Generated Steps:")
@@ -529,6 +577,7 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
 
         The available CSV files/file have the following details & PATHS TO ACCCES THEM ARE ALSO GIVEN PLS USE THEM FURTHUR:
         {csv_info_text}
+        - Use the same CSV PATH above compulsarily. Do not use any other path.
         Guidelines:
         - If the user query **requires only a factual response** (e.g., "How many rows?", "What are the column names?"), return a direct answer **inside a print statement**, e.g.:print("<some relevant text>:", <response>)
         - Use polars instead of pandas if the csv has more than 50000 rows, otherwise use pandas only for creation of dataframe. 
@@ -571,6 +620,7 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
             - **Generate above stats for each plot at the end ad NOT IN A SINGLE JSON FILE BUT IN INDIVIDUAL JSON FILE per plot** 
             - STRICTLY DONT use THIS plt.savefig()
             - Do not plot the same plots using plotly and matplotlib, either plot it using matplotlib or plotly.
+        - Do not forget to create JSON if you are genearting any kind of plots, STRICTLY you should create JSON for a plot(if at all we have plots).
         - Any intermediate CSV files (like cleaned data) must be saved to /home/user/home/atharv/cleaned_step{state["current_step_index"]}.csv or similar.
         - If generating a data which is tabular, dont print it. Create a csv and save it.
         - ** Some Common errors **
@@ -818,10 +868,9 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             state["error"] = None
             client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
             prompt = f"""
-                Please write a high-level, non-technical summary explaining the following process.
+                Please write a high-level, non-technical summary explaining the following code.
                 Assume the reader is a business user, not a developer.
-                Focus on explaining what data was analyzed, what visualizations were created, and any insights that might have been gained.
-                Here is the process:
+                Here is the code:
                 {step_code}
 
                 Please keep the explanation clear and simple in 20-30 words.
@@ -960,7 +1009,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                     state["uploaded_files"][file_path] = s3_url  # Store S3 URL
                 
                 description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
-                state["final_response"] += description
+                state["final_response"] += description or ""
                 print("Final Description:", description)
             
             except Exception as e:
@@ -1173,9 +1222,6 @@ class CodeInterpreterInput(BaseModel):
 @apponefast.post("/run")
 async def run_langgraph(data: CodeInterpreterInput):
     try:
-        # await save_chat_message(user_id="user123", is_ai=False, message="How many survived?", summary="")
-        # await save_chat_message(user_id="user123", is_ai=True, message=data.user_query, summary="")
-        # summaries = await get_last_ai_summaries("user123")
         summaries = []
         input_state = {
             "user_query": data.user_query,
@@ -1192,122 +1238,34 @@ async def run_langgraph(data: CodeInterpreterInput):
             "final_response": "",
             "context": summaries,
             "user_id": data.user_id,
-            "chat_id": data.chat_id
+            "chat_id": data.chat_id,
+            "steps": ""
         }
         print(input_state," input_state")
 
         # ✅ Invoke LangGraph
         executable_graph = graph.compile()
         output_state = await executable_graph.ainvoke(input_state, {"recursion_limit": 100})  # ✅ Fix
-        
-        client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
-        prompt = f"""
-        You are a summarization assistant, You are an assistant helping to build contextual memory for a CSV analysis chatbot.
 
-        Given the full text output below, your job is to produce a clean, structured summary of what was done to answer the user’s query.
-
-        Focus on these rules:
-
-        ---
-
-        🟢 **SECTION 1: Summary of what was done**
-
-        - Describe **in 3–4 lines** what was done to solve the query — only mention actions like:
-        - If a file was generated (what and why)
-        - If any values were calculated (what values and for what purpose)
-        - If plots were created (what they show, what was discovered)
-
-        - DO NOT mention individual steps or say "the AI did" — this is a user-facing summary.
-        - Keep it outcome-focused: What was analyzed, what was generated, and what key insights were uncovered.
-
-        ---
-
-        🟢 **SECTION 2: List of important values discovered** (only if any were printed or inferred)
-
-        - Bullet points of important insights like:
-        - Survival rates by class or gender
-        - Averages, counts, or major numeric outcomes
-        - Differences or comparisons (e.g., females survived more than males)
-
-        ---
-
-        🟢 **SECTION 3: All files that were generated**
-
-        - For each file:
-        - File name  
-        - Purpose or what it contains  
-        - S3 link or sandbox path
-
-        Use this format:
-
-        Files Generated:
-
-        numerical_summary.csv: Summary stats for Age and Fare
-        📍 Path: /home/user/home/atharv/numerical_summary.csv
-        🔗 S3: https://...
-
-        Survival Rates by Gender.png: Bar chart visualizing survival by gender
-        📍 Path: /home/user/home/atharv/...
-        🔗 S3: https://...
-
-
-        Now, generate the summary using the text below: \n {output_state.get("final_response")}
-
-        """
-
-        response = await client.chat.completions.create(
-            model="gpt-4o",
-            messages=[{"role": "system", "content": " You are an assistant helping to build contextual memory for a CSV analysis chatbot."},
-                      {"role": "user", "content": prompt}],
-        )
-        # print(output_state.get("final_response")," hellorvce")
-        # print(response.choices[0].message.content)
-        # await save_chat_message(user_id="user123", is_ai=True, message=output_state.get("final_response"), summary=response.choices[0].message.content)
-        list_files_script = """
-        import os
-
-        def list_all_files(directory):
-            file_paths = []
-            for root, dirs, files in os.walk(directory):
-                for file in files:
-                    file_paths.append(os.path.join(root, file))
-            print("\\n".join(file_paths))  # Ensure paths are printed correctly
-
-        list_all_files("/home/user/home/atharv/")
-        """
-        sbx = output_state.get("sandbox")
-        dir_result = sbx.run_code(list_files_script)
-
-        # ✅ Extract and clean the list of file paths
-        raw_output = dir_result.logs.stdout if dir_result.logs.stdout else []
-        cleaned_file_paths = [path.strip() for path in raw_output[0].split("\n") if path.strip()]
-
-        print("📂 Files found in Sandbox:", cleaned_file_paths)
-        
         await stream_to_frontend(data.chat_id, "completed_stream", "")
+
+        print(output_state.get("steps", ""))
+
+        print(output_state.get("csv_info_list"))
 
         return {
             "status": "success",
             "execution_result": output_state.get("execution_result", ""),  # ✅ Use .get() to avoid KeyErrors
             "error": output_state.get("error", None),
-            "code": output_state.get("generated_code", "")
+            "steps": output_state.get("steps", ""),
+            "code": output_state.get("generated_code", ""),
+            "csv_info_list": output_state.get("csv_info_list")
         }
     
-        
 
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# ✅ Run Flask Server
-# if __name__ == '__main__':
-#     port = int(os.environ.get("PORT", 5006)) 
-#     socketio.run(appone, host="0.0.0.0", port=port, debug=True, allow_unsafe_werkzeug=True)
-
-    # appone.run(host="0.0.0.0", port=5006, debug=False, use_reloader=False)
-# if __name__ == '__main__':
-#     socketio.run(appone, host="localhost", port=5006, debug=True)
 
 if __name__ == "__main__":
     uvicorn.run(apponefast, host="0.0.0.0", port=int(os.environ.get("PORT", 5006)), log_level="info")
