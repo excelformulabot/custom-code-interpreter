@@ -84,6 +84,7 @@ class CodeInterpreterState(TypedDict):
     user_id: str
     chat_id: str
     steps: str
+    sandbox_id: str
 
 
 # 🟢 Step 2: Initialize Langgraph with State
@@ -276,18 +277,20 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
     print("🚀 New CSVs detected or no existing info. Processing CSVs now...")
 
 
+    state["sandbox"] = Sandbox.connect(state.get("sandbox_id")) 
+
     max_retries = 5  # Set a maximum retry limit to avoid infinite loop
     retry_count = 0
     
     while retry_count < max_retries:
         try:
             # Start retry loop
-            sbx = Sandbox()
+            sbx = state.get("sandbox")
             sbx.commands.run("pip install polars")
             sbx.commands.run("pip install pyarrow")
             sbx.commands.run("pip install mpld3")
             
-            state["sandbox"] = sbx
+            # state["sandbox"] = sbx
 
             csv_info_list = []
             sandbox_paths = []
@@ -1215,6 +1218,7 @@ class CodeInterpreterInput(BaseModel):
     user_id: str
     chat_id: str
     user_query: str
+    sandbox_id: str
     attached_files: List[AttachedFile]
     last_5_messages: List[Message]
 
@@ -1239,9 +1243,11 @@ async def run_langgraph(data: CodeInterpreterInput):
             "context": summaries,
             "user_id": data.user_id,
             "chat_id": data.chat_id,
-            "steps": ""
+            "steps": "",
+            "sandbox_id": data.sandbox_id
         }
         print(input_state," input_state")
+
 
         # ✅ Invoke LangGraph
         executable_graph = graph.compile()
