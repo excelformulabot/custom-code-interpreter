@@ -83,7 +83,7 @@ class CodeInterpreterState(TypedDict):
     context: list[str]
     user_id: str
     chat_id: str
-    steps: str
+    steps: list[str]
     sandbox_id: str
 
 
@@ -277,7 +277,8 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
     print("🚀 New CSVs detected or no existing info. Processing CSVs now...")
 
 
-    state["sandbox"] = Sandbox.connect(state.get("sandbox_id")) 
+    # state["sandbox"] = Sandbox.connect(state.get("sandbox_id"))
+    # print(f"This is ur sandox {state['sandbox']}")
 
     max_retries = 5  # Set a maximum retry limit to avoid infinite loop
     retry_count = 0
@@ -285,7 +286,8 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
     while retry_count < max_retries:
         try:
             # Start retry loop
-            sbx = state.get("sandbox")
+            sbx = Sandbox.connect(state.get("sandbox_id"))
+            print(f"This is ur sandox {state['sandbox']}")
             sbx.commands.run("pip install polars")
             sbx.commands.run("pip install pyarrow")
             sbx.commands.run("pip install mpld3")
@@ -295,8 +297,15 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
             csv_info_list = []
             sandbox_paths = []
 
+            csv_info_list = state.get("csv_info_list", [])
+            existing_s3_urls = {info.get("s3_url") for info in csv_info_list if "s3_url" in info}
+
+
             for csv_path in state["csv_file_paths"]:
                 print(f"Processing file: {csv_path}")
+                if csv_path in existing_s3_urls:
+                    print(f"⚠️ Skipping already processed file: {csv_path}")
+                    continue
         
                 # Read with Polars
                 if csv_path.startswith("http"):
@@ -328,7 +337,8 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
                     "column_names": column_names,
                     "num_rows": num_rows,
                     "data_types": data_types,
-                    "sample_data": sample_data
+                    "sample_data": sample_data,
+                    "s3_url": csv_path  # ✅ Add original path
                 })
 
                 print(f"Finished Processing file: {csv_path}")
@@ -355,13 +365,14 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
                 state["execution_result"] = "❌ Maximum retries reached. Task failed."
                 break
     
-    print()
+    print(f"This is ur object {state['csv_info_list']}")
 
     return state
 
 
 async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
     print("hello gs")
+    state["steps"].append(state['user_query'])
     # stream_to_frontend("bot_message","The following CSV files is/are available:\n")
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     chat_id = state.get("chat_id")
@@ -408,6 +419,8 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         A user has uploaded a CSV file but asked the following question instead:
 
         "{state['user_query']}"
+        Previous Context : {state['steps']} 
+        You can answer directly from this if required, basically it is previously asked context. 
 
         This question is unrelated to data analysis. Please respond in a kind, conversational tone as a friendly assistant. Keep it short and warm, like you're chatting with a curious user. Don't reference CSVs unless they bring it up again.
         """
@@ -475,8 +488,8 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         - If multiple steps are necessary, ensure they are logically distinct and non-repetitive.
 
 
-        **Previous context (summaries of earlier tasks, use this in response if required):**
-        {chr(10).join(f"- {ctx}" for ctx in state.get("context", []) if ctx)}
+        **Previous context (summaries of earlier tasks, use this in response if required): if asked something similar, u can refer and give that again saying u have already asked this but will redo it.**
+        {state['steps']}
 
         **User Query:**
         "{state['user_query']}"
@@ -520,7 +533,7 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
 
     # steps_text = response.choices[0].message.content.strip()
     steps_text = collected_text
-    state["steps"] = collected_text
+    state["steps"].append(collected_text)
     state["final_response"] += collected_text
     steps = [line.strip() for line in steps_text.split("\n") if line.strip() and re.match(r"^\d+\.", line)]
     # print("\n🔹 OpenAI Generated Steps:")
@@ -545,6 +558,9 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
     print("generate_python_code")
     chat_id = state.get("chat_id")
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+    if not state["stepwise_code"]:
+        print("No steps to process.")
+        return state
 
     current_step = state["stepwise_code"][state["current_step_index"]]
     step_description = current_step["description"]
@@ -574,9 +590,6 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
         You are currently working on **Step {state["current_step_index"]}: {step_description}**
 
         Please generate **ONLY Python code** for this step. Do not write any explanations or comments. Return only the code in a code block.
-        
-        **Previous context (summaries of earlier tasks, use this in response if required):**
-        {chr(10).join(f"- {ctx}" for ctx in state.get("context", []) if ctx)}
 
         The available CSV files/file have the following details & PATHS TO ACCCES THEM ARE ALSO GIVEN PLS USE THEM FURTHUR:
         {csv_info_text}
@@ -623,7 +636,12 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
             - **Generate above stats for each plot at the end ad NOT IN A SINGLE JSON FILE BUT IN INDIVIDUAL JSON FILE per plot** 
             - STRICTLY DONT use THIS plt.savefig()
             - Do not plot the same plots using plotly and matplotlib, either plot it using matplotlib or plotly.
-        - Do not forget to create JSON if you are genearting any kind of plots, STRICTLY you should create JSON for a plot(if at all we have plots).
+        - Do not forget to create JSON PER PLOT(DO NOT AGGREGATE INTO ONE FILE) if you are genearting any kind of plots, STRICTLY you should create JSON for a plot(if at all we have plots).
+        - Always set the title of the plot using `plt.title("<TITLE>")`.
+        - Then also set `fig.suptitle("<TITLE>")` — E2B reads this for chart metadata like `res.chart.title`.
+        - Create plots using `fig = plt.figure(...)` and assign them explicitly (e.g., `fig1`, `fig2`, ...).
+        - Displaying the plots using `plt.show()`
+        - This ensures all plots are captured by the sandbox and included in the results.
         - Any intermediate CSV files (like cleaned data) must be saved to /home/user/home/atharv/cleaned_step{state["current_step_index"]}.csv or similar.
         - If generating a data which is tabular, dont print it. Create a csv and save it.
         - ** Some Common errors **
@@ -770,7 +788,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         state["error"] = None  # Reset any previous errors
 
         # ✅ Retrieve the Sandbox instance
-        sbx = state.get("sandbox")
+        sbx = Sandbox.connect(state.get("sandbox_id"))
         if not sbx:
             raise ValueError("Sandbox instance not found in state.")
 
@@ -831,6 +849,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             for log in result.logs.stdout:
                 print(log)
                 if is_plain_text(log):
+                    state["steps"].append(log)
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     file_name = f"step{step_index+1}_{timestamp}.txt"
 
@@ -926,8 +945,12 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         dir_result = sbx.run_code(list_files_script)
 
         # ✅ Extract and clean the list of file paths
-        raw_output = dir_result.logs.stdout if dir_result.logs.stdout else []
-        cleaned_file_paths = [path.strip() for path in raw_output[0].split("\n") if path.strip()]
+        raw_output = dir_result.logs.stdout or []
+        if raw_output:
+            cleaned_file_paths = [path.strip() for path in raw_output[0].split("\n") if path.strip()]
+        else:
+            cleaned_file_paths = []
+
 
         print("📂 Files found in Sandbox:", cleaned_file_paths)
         # await stream_to_frontend(chat_id, "bot_message", f"\n📂 Files found in Sandbox: {cleaned_file_paths}")
@@ -1012,6 +1035,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                     state["uploaded_files"][file_path] = s3_url  # Store S3 URL
                 
                 description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
+                state["steps"].append(description)
                 state["final_response"] += description or ""
                 print("Final Description:", description)
             
@@ -1041,7 +1065,8 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                 if not isinstance(png_bytes, (bytes, bytearray)):
                     raise TypeError(f"Decoded content is not bytes. Got: {type(png_bytes)}")
 
-                file_name = f"step{step_index+1}_{timestamp}_{res.chart.title}.png"
+                chart_title = getattr(res.chart, "title", f"Plot_{idx+1}")
+                file_name = f"step{step_index+1}_{timestamp}_{chart_title}.png"
                 s3_url = upload_to_s3_direct(png_bytes, file_name, S3_BUCKET_NAME)
 
                 if s3_url:
@@ -1049,6 +1074,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                     await stream_to_frontend(chat_id, "bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
 
                 description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
+                state["steps"].append(description)
                 print("Final Description:", description)
                 state["final_response"] += description
 
@@ -1094,15 +1120,23 @@ async def auto_debug_python_code(state: CodeInterpreterState) -> CodeInterpreter
         ```
         {state['error']}
 
+
         ### 🔹 **General Debugging Rules**
-            - If using `polars` and the error is related to `groupby`, replace `.groupby()` with `.group_by()` (Polars uses `.group_by()`, not `.groupby()`).
-            - If `int64` or `float64` serialization errors occur (e.g., **Pydantic warnings**):
+        - If using `polars` and the error is related to `groupby`, replace `.groupby()` with `.group_by()` (Polars uses `.group_by()`, not `.groupby()`).
+        - If `int64` or `float64` serialization errors occur (e.g., **Pydantic warnings**):
             - Convert `int64` → `int` using `.astype(int)` or `.item()`
             - Convert `float64` → `float` using `.astype(float)`
-            - If **NaN or inf values** cause JSON issues, fix them:
-            ```python
-            df.replace([np.inf, -np.inf], np.nan, inplace=True)  # Replace infinite values
-            df.fillna(0, inplace=True)  # Fill missing values with 0 (or another default)
+        - If **NaN or inf values** cause JSON issues, fix them:
+            - `df.replace([np.inf, -np.inf], np.nan, inplace=True)`  # Replace infinite values
+            - `df.fillna(0, inplace=True)`  # Fill missing values with 0 (or another default)
+        if you get "can only concatenate str (not "NoneType") to str" as error/exception
+        - If generating a plot with `matplotlib`, and you want the chart metadata to be picked up by the system (like `res.chart.title` in E2B): 
+            - Set the plot title using `plt.title("<TITLE>")`
+            - **Also set** `fig.suptitle("<TITLE>")` — this is what the system reads as the chart title.
+            - Show using `plt.show()`
+
+        The available CSV files/file have the following details & PATHS TO ACCES THEM ARE ALSO GIVEN, PLS USE THEM ONLY FURTHUR While debugging:
+
 
         ```
         The available CSV files/file have the following details & PATHS TO ACCCES THEM ARE ALSO GIVEN, PLS USE THEM ONLY FURTHUR While debugging:
@@ -1206,21 +1240,24 @@ class AttachedFile(BaseModel):
     file_name: str
     url: str
 
-
 class Message(BaseModel):
     role: str
     text: str
     input_files: Optional[List] = []
     output_files: Optional[List] = []
 
-
 class CodeInterpreterInput(BaseModel):
     user_id: str
     chat_id: str
     user_query: str
-    sandbox_id: str
     attached_files: List[AttachedFile]
     last_5_messages: List[Message]
+    sandbox_id: str
+    csv_info_list: Optional[List[dict]] = []
+    uploaded_files: Optional[dict] = {}  # ✅ Add this line to support uploaded_files
+    steps: Optional[List[str]] = []  # ✅ Add this line
+
+
 
 # ✅ Flask API Endpoint
 @apponefast.post("/run")
@@ -1230,7 +1267,7 @@ async def run_langgraph(data: CodeInterpreterInput):
         input_state = {
             "user_query": data.user_query,
             "csv_file_paths":[file.url for file in data.attached_files],
-            "csv_info_list": [],
+            "csv_info_list": data.csv_info_list if data.csv_info_list else [],  # ✅ Use incoming data if present
             "generated_code": "",
             "execution_result": "",
             "error": None,
@@ -1243,10 +1280,14 @@ async def run_langgraph(data: CodeInterpreterInput):
             "context": summaries,
             "user_id": data.user_id,
             "chat_id": data.chat_id,
-            "steps": "",
-            "sandbox_id": data.sandbox_id
+            "steps": list(data.steps) if isinstance(data.steps, (list, tuple)) else [],
+            "sandbox_id": data.sandbox_id,
+            "uploaded_files": data.uploaded_files or {}
         }
         print(input_state," input_state")
+
+        sbx = Sandbox.connect(data.sandbox_id)
+        sbx.set_timeout(18000)
 
 
         # ✅ Invoke LangGraph
@@ -1263,15 +1304,26 @@ async def run_langgraph(data: CodeInterpreterInput):
             "status": "success",
             "execution_result": output_state.get("execution_result", ""),  # ✅ Use .get() to avoid KeyErrors
             "error": output_state.get("error", None),
-            "steps": output_state.get("steps", ""),
+            "steps": output_state.get("steps", []),
             "code": output_state.get("generated_code", ""),
-            "csv_info_list": output_state.get("csv_info_list")
+            "csv_info_list": output_state.get("csv_info_list"),
+            "uploaded_files": input_state["uploaded_files"]  # ✅ return to frontend
         }
     
 
     except Exception as e:
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=str(e))
+    
+
+from fastapi import FastAPI
+from e2b_code_interpreter import Sandbox
+
+@apponefast.post("/create-sandbox")
+async def create_sandbox():
+    sandbox = Sandbox()
+    return {"sandbox_id": sandbox.sandbox_id}
+
 
 if __name__ == "__main__":
     uvicorn.run(apponefast, host="0.0.0.0", port=int(os.environ.get("PORT", 5006)), log_level="info")
