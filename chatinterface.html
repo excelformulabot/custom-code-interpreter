@@ -51,7 +51,7 @@
     let requestDataSandboxId = '';
 
     function initializeWebSocket() {
-        ws = new WebSocket(`ws://0.0.0.0:5006/ws?chat_id=${encodeURIComponent(userId)}`);
+        ws = new WebSocket(`ws://custom-code-interpreter.onrender.com/ws?chat_id=${encodeURIComponent(userId)}`);
 
         ws.onmessage = function (event) {
             const parsedData = JSON.parse(event.data);
