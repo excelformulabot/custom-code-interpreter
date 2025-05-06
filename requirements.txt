@@ -9,7 +9,6 @@ altair==5.3.0
 bokeh==3.4.1
 boto3==1.35.97
 catboost==1.2.3
-causalimpact==0.0.14
 dask==2024.4.1
 duckdb==0.10.2
 e2b_code_interpreter==1.0.5
