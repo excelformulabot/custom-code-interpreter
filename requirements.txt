@@ -25,3 +25,4 @@ gevent
 uvicorn
 fastapi
 python-dotenv==1.0.0
+causalimpact==0.0.14
