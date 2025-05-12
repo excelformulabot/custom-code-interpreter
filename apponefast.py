@@ -65,7 +65,6 @@ async def stream_to_frontend(chat_id: str, event: str, message):
     else:
         print(f"⚠️ No WebSocket connection found for chat_id: {chat_id}")
 
-
 # 🟢 Step 1: Define State Schema
 class CodeInterpreterState(TypedDict):
     user_query: str
@@ -83,7 +82,7 @@ class CodeInterpreterState(TypedDict):
     context: list[str]
     user_id: str
     chat_id: str
-    steps: list[str]
+    steps: list[dict[str, str]]  # Each step has: {"question": ..., "response": ...}
     sandbox_id: str
 
 
@@ -166,19 +165,19 @@ def is_plain_text(text):
 
 def read_csv_from_url(url):
     print("read_csv_from_url")
-    with httpx.stream("GET", url) as response:
-        if response.status_code != 200:
-            raise Exception(f"Failed to fetch {url}, status: {response.status_code}")
+    # with httpx.stream("GET", url) as response:
+    #     if response.status_code != 200:
+    #         raise Exception(f"Failed to fetch {url}, status: {response.status_code}")
 
-        # Stream the content into memory (BytesIO for binary data)
-        buffer = BytesIO()
-        for chunk in response.iter_bytes():
-            buffer.write(chunk)
+    #     # Stream the content into memory (BytesIO for binary data)
+    #     buffer = BytesIO()
+    #     for chunk in response.iter_bytes():
+    #         buffer.write(chunk)
 
-        buffer.seek(0)  # Rewind for Polars to read
+    #     buffer.seek(0)  # Rewind for Polars to read
 
-        # Polars can read directly from BytesIO (memory file)
-        df = pl.read_csv(buffer)
+    #     # Polars can read directly from BytesIO (memory file)
+    df = pl.read_csv(url)
 
     return df
 
@@ -193,15 +192,24 @@ def download_file_to_sandbox(sbx: Sandbox, url: str, sandbox_folder: str = "home
     sandbox_path = f"{sandbox_folder}/{filename}"
     full_path = f"/home/user/{sandbox_path}"
 
-    timeout = httpx.Timeout(30.0, read=30.0, connect=10.0)
-    with httpx.stream("GET", url, timeout=timeout) as response:
-        if response.status_code != 200:
-            raise Exception(f"Failed to download {url}, status: {response.status_code}")
-        buffer = BytesIO()
-        for chunk in response.iter_bytes():
-            buffer.write(chunk)
-        buffer.seek(0)
-        sbx.files.write(sandbox_path, buffer.read())  # write bytes to sandbox
+    sbx.commands.run(f"mkdir -p /home/user/{sandbox_folder}")
+
+    command = f"curl -L -o {full_path} '{url}'"
+    result = sbx.commands.run(command)
+    sbx.set_timeout(18000)
+
+    if result.error:
+        raise Exception(f"Sandbox download failed: {result.error.value}")
+
+    # timeout = httpx.Timeout(30.0, read=30.0, connect=10.0)
+    # with httpx.stream("GET", url, timeout=timeout) as response:
+    #     if response.status_code != 200:
+    #         raise Exception(f"Failed to download {url}, status: {response.status_code}")
+    #     buffer = BytesIO()
+    #     for chunk in response.iter_bytes():
+    #         buffer.write(chunk)
+    #     buffer.seek(0)
+    #     sbx.files.write(sandbox_path, buffer.read())  # write bytes to sandbox
 
     return full_path
 
@@ -275,6 +283,11 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
         return state
 
     print("🚀 New CSVs detected or no existing info. Processing CSVs now...")
+    sbx = Sandbox.connect(state.get("sandbox_id"))
+    print(f"This is ur sandox {sbx}")
+    sbx.commands.run("pip install polars")
+    sbx.commands.run("pip install pyarrow")
+    sbx.commands.run("pip install mpld3")
 
 
     # state["sandbox"] = Sandbox.connect(state.get("sandbox_id"))
@@ -286,13 +299,6 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
     while retry_count < max_retries:
         try:
             # Start retry loop
-            sbx = Sandbox.connect(state.get("sandbox_id"))
-            print(f"This is ur sandox {state['sandbox']}")
-            sbx.commands.run("pip install polars")
-            sbx.commands.run("pip install pyarrow")
-            sbx.commands.run("pip install mpld3")
-            
-            # state["sandbox"] = sbx
 
             csv_info_list = []
             sandbox_paths = []
@@ -372,7 +378,10 @@ async def extract_csv_info(state: CodeInterpreterState) -> CodeInterpreterState:
 
 async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
     print("hello gs")
-    state["steps"].append(state['user_query'])
+    state["steps"].append({
+        "question": state["user_query"],
+        "response": ""
+    })
     # stream_to_frontend("bot_message","The following CSV files is/are available:\n")
     client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
     chat_id = state.get("chat_id")
@@ -385,8 +394,7 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         """
 
     classification_prompt = f"""
-        A user has submitted the following query:
-        "{state['user_query']}"
+        A user will submit the a query:
 
         They uploaded the following CSV files:
         {csv_schema_text}
@@ -402,9 +410,9 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
     classification_response = await client.chat.completions.create(
         model="gpt-4o-mini",
         messages=[{
-            "role": "system", "content": "You are a query classifier for a data assistant."
+            "role": "system", "content": f"You are a query classifier for a data assistant.\n {classification_prompt}"
         }, {
-            "role": "user", "content": classification_prompt
+            "role": "user", "content": state['user_query']
         }]
     )
     query_type = classification_response.choices[0].message.content.strip().lower()
@@ -417,8 +425,6 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         # Generate a natural response via OpenAI
         chat_prompt = f"""
         A user has uploaded a CSV file but asked the following question instead:
-
-        "{state['user_query']}"
         Previous Context : {state['steps']} 
         You can answer directly from this if required, basically it is previously asked context. 
 
@@ -428,8 +434,8 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         response = await client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[
-                {"role": "system", "content": "You are a warm and witty assistant that chats casually with users."},
-                {"role": "user", "content": chat_prompt}
+                {"role": "system", "content": f"You are a warm and witty assistant that chats casually with users.\n {chat_prompt}"},
+                {"role": "user", "content": state['user_query'] }
             ],
             temperature=0.8,
             stream=True
@@ -442,6 +448,9 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
                 collected_text += partial_text
                 await stream_to_frontend(chat_id, "bot_message", partial_text)
 
+        if state["steps"]:
+                    state["steps"][-1]["response"] += collected_text
+    
         state["final_response"] += collected_text
         state["stepwise_code"] = []  # No code steps to run
         state["current_step_code"] = ""
@@ -466,7 +475,8 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         {csv_info['sample_data']}
         """
 
-    steps_prompt = f"""
+    # Step 1: Generate the system prompt without the user query embedded
+    system_prompt = f"""
         You are a **data analyst assistant**. Based on the user's query and the available CSV files, generate a **stepwise process** for resolving the user query. 
 
         **Tone & Style:**
@@ -476,49 +486,41 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
         - Ensure that the steps will be executed in **Python** and will work in the same sandbox environment to maintain state across steps.
         - Vary phrasing to avoid repetition. Instead of starting every step with "I will do this," make it dynamic—sometimes say "Let me check that," "Next, I'll handle...," or "To make sure we get the best results, I'll also..."
         - For **simple fact queries**, generate **only 1 step**, combining dataset loading and query resolution in one go.
-            - For example, if the query asks for row count, combine loading and counting rows in one step.
         - For **moderate analysis**, generate **1 step**, combining data loading, processing, and analysis in one step.
         - For **complex analysis**, generate **2-5 steps**, only if necessary. The task should be broken down into **distinct, actionable steps** with no redundant operations.
-            - Ensure each step is unique and doesn't repeat work already done (like reloading data).
         - Avoid unnecessary steps like saving files unless explicitly requested.
-        - If the task is simple (like counting rows), only one step is needed.
         - Combine dataset loading and simple analysis into one step if possible.
         - Ensure each step contributes to the resolution of the query and that the steps are actionable in Python.
         - Each new step **must build upon previous steps**, using the same sandbox environment.
         - If multiple steps are necessary, ensure they are logically distinct and non-repetitive.
 
-
-        **Previous context (summaries of earlier tasks, use this in response if required): if asked something similar, u can refer and give that again saying u have already asked this but will redo it.**
+        **Previous context (summaries of earlier tasks, use this in response if required):**
         {state['steps']}
-
-        **User Query:**
-        "{state['user_query']}"
 
         **Available CSV Files:**
         {csv_info_text}
 
         **Guidelines for Step Generation:**
-        - For **simple fact queries**, combine dataset loading and the task into **one step**.
-        - For **moderate analysis**, generate **1 step** to cover dataset loading, processing, and analysis.
-        - For **complex analysis**, generate **2–5 steps** only if necessary. 
-        - Each step must be **logically distinct** and should avoid repeating operations.
-        - **Avoid adding steps just to display or summarize outputs**, like “finally show the plots” — assume outputs are displayed inline with analysis steps.
-        - Avoid steps like “generate visualizations” AND then another step “display visualizations.” These should be combined.
-        - Only include a new step if it introduces new logic, computation, or visualization — not just to summarize or repeat.
+        - Combine simple analysis into one step.
+        - Break down complex tasks into distinct non-repetitive steps.
+        - Don't output any code or summaries — only actionable numbered steps.
 
         **Return Format:**
-        - Provide only the **numbered list of steps**, keeping them **concise yet clear**.
-        - **Do not generate any code**, only structured steps..
+        - Return a **numbered list of steps** only.
+        - **Do not generate any code**, just structured steps.
     """
 
-
+    # Step 2: Send actual user query as the user message
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "system", "content": "You are a data analysis expert."},
-                  {"role": "user", "content": steps_prompt}],
+        messages=[
+            {"role": "system", "content": system_prompt},
+            {"role": "user", "content": state["user_query"]}
+        ],
         temperature=0.2,
         stream=True
     )
+
     print("\n🔹 OpenAI Generated Steps:")
     # await stream_to_frontend("bot_message", "\n🔹 OpenAI Generated Steps:")
     
@@ -533,7 +535,10 @@ async def generate_steps(state: CodeInterpreterState) -> CodeInterpreterState:
 
     # steps_text = response.choices[0].message.content.strip()
     steps_text = collected_text
-    state["steps"].append(collected_text)
+
+    if state["steps"]:
+        state["steps"][-1]["response"] = collected_text
+
     state["final_response"] += collected_text
     steps = [line.strip() for line in steps_text.split("\n") if line.strip() and re.match(r"^\d+\.", line)]
     # print("\n🔹 OpenAI Generated Steps:")
@@ -585,7 +590,6 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
         {csv_info_text}
 
         User Query(Just keep this in hindsight, Just give the code for the current step!):
-        {state['user_query']}
 
         You are currently working on **Step {state["current_step_index"]}: {step_description}**
 
@@ -651,8 +655,8 @@ async def generate_python_code(state: CodeInterpreterState) -> CodeInterpreterSt
     print(step_prompt)
     response = await client.chat.completions.create(
         model="gpt-4o-mini",
-        messages=[{"role": "system", "content": "You are a Python expert."},
-                  {"role": "user", "content": step_prompt}],
+        messages=[{"role": "system", "content": f"You are a Python expert.\n {step_prompt}"},
+                  {"role": "user", "content": state['user_query']} ],
         temperature=0.2,
         stream=True
     )
@@ -789,6 +793,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
 
         # ✅ Retrieve the Sandbox instance
         sbx = Sandbox.connect(state.get("sandbox_id"))
+        sbx.set_timeout(18000)
         if not sbx:
             raise ValueError("Sandbox instance not found in state.")
 
@@ -799,6 +804,7 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         step_code = state["current_step_code"]
         print(f"🚀 Running Step {step_index + 1}")
         await stream_to_frontend(chat_id, "bot_message", f"\n🚀 Running Step {step_index + 1} in the Sandbox......\n")
+        sbx.set_timeout(18000)
         result = sbx.run_code(step_code)
         print("Result: ",result)        
         try:
@@ -849,7 +855,8 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             for log in result.logs.stdout:
                 print(log)
                 if is_plain_text(log):
-                    state["steps"].append(log)
+                    if state["steps"]:
+                        state["steps"][-1]["response"] += log
                     timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     file_name = f"step{step_index+1}_{timestamp}.txt"
 
@@ -892,15 +899,13 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
             prompt = f"""
                 Please write a high-level, non-technical summary explaining the following code.
                 Assume the reader is a business user, not a developer.
-                Here is the code:
-                {step_code}
 
                 Please keep the explanation clear and simple in 20-30 words.
             """
             response = await client.chat.completions.create(
                 model="gpt-4o-mini",
-                messages=[{"role": "system", "content": "You are a code explainer."},
-                        {"role": "user", "content": prompt}],
+                messages=[{"role": "system", "content": f"You are a code explainer. \n {prompt}"},
+                        {"role": "user", "content": f"Here is the code: {step_code}"}],
                 temperature=0.2,
                 stream=True
             )
@@ -1035,7 +1040,8 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                     state["uploaded_files"][file_path] = s3_url  # Store S3 URL
                 
                 description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
-                state["steps"].append(description)
+                if state["steps"]:
+                    state["steps"][-1]["response"] += "\\n" + description
                 state["final_response"] += description or ""
                 print("Final Description:", description)
             
@@ -1074,7 +1080,8 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
                     await stream_to_frontend(chat_id, "bot_message", f'\n✅ Uploaded directly to S3: {s3_url}')
 
                 description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
-                state["steps"].append(description)
+                if state["steps"]:
+                    state["steps"][-1]["response"] += "\\n" + description
                 print("Final Description:", description)
                 state["final_response"] += description
 
@@ -1246,16 +1253,20 @@ class Message(BaseModel):
     input_files: Optional[List] = []
     output_files: Optional[List] = []
 
+class Step(BaseModel):
+    question: str
+    response: str
+
 class CodeInterpreterInput(BaseModel):
     user_id: str
     chat_id: str
     user_query: str
     attached_files: List[AttachedFile]
-    last_5_messages: List[Message]
+    # last_5_messages: List[Message]
     sandbox_id: str
     csv_info_list: Optional[List[dict]] = []
     uploaded_files: Optional[dict] = {}  # ✅ Add this line to support uploaded_files
-    steps: Optional[List[str]] = []  # ✅ Add this line
+    steps: Optional[List[Step]] = []  # ✅ Add this line
 
 
 
@@ -1280,7 +1291,7 @@ async def run_langgraph(data: CodeInterpreterInput):
             "context": summaries,
             "user_id": data.user_id,
             "chat_id": data.chat_id,
-            "steps": list(data.steps) if isinstance(data.steps, (list, tuple)) else [],
+            "steps": [step.model_dump() for step in data.steps] if data.steps else [],
             "sandbox_id": data.sandbox_id,
             "uploaded_files": data.uploaded_files or {}
         }
