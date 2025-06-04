@@ -978,9 +978,40 @@ async def execute_python_code(state: CodeInterpreterState) -> CodeInterpreterSta
         # Extract all CSV sandbox paths for efficient lookup
         csv_sandbox_paths = {csv_info["sandbox_path"] for csv_info in csv_info_list}
 
-        for file_path in cleaned_file_paths:
-            if not file_path.endswith(".json"):
-                continue  # Skip non-JSON files
+for file_path in cleaned_file_paths:
+    if file_path in state["uploaded_files"]:
+        print(f"⚠️ Skipping already uploaded file: {file_path}")
+        continue
+
+    if file_path in csv_sandbox_paths:
+        print(f"⚠️ Skipping original CSV file: {file_path}")
+        continue
+
+    try:
+        content = sbx.files.read(file_path)
+        if isinstance(content, str):
+            content = content.encode()
+
+        orig_file_name = os.path.basename(file_path)
+        file_name = f"step{step_index+1}_{timestamp}_{orig_file_name}"
+        s3_url = upload_to_s3_direct(content, file_name, S3_BUCKET_NAME)
+
+        if s3_url:
+            state["final_response"] += f'\n✅ Uploaded file to S3: {s3_url}'
+            await stream_to_frontend(chat_id, "bot_message", f'\n✅ Uploaded file to S3: {s3_url}')
+            state["uploaded_files"][file_path] = s3_url
+
+            # Optionally trigger description for JSON/PNG
+            if file_path.endswith(".png"):
+                description = await get_json_and_generate_description(s3_url, S3_BUCKET_NAME, state)
+                state["final_response"] += description or ""
+                if state["steps"]:
+                    state["steps"][-1]["response"] += "\n" + description
+
+    except Exception as e:
+        print(f"⚠️ Error uploading {file_path}: {e}")
+        await stream_to_frontend(chat_id, "bot_message", f"\n⚠️ Error uploading {file_path}: {e}")
+
 
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
             
